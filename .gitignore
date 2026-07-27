@@ -1,0 +1,44 @@
+# Dependencies
+node_modules/
+
+# Environment & secrets
+.env
+.env.*
+!.env.example
+
+# Build outputs
+dist/
+build/
+.vite/
+*.tsbuildinfo
+
+# Test / coverage
+coverage/
+.nyc_output/
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Uploads / local media
+uploads/
+temp/
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Capacitor native shells (regenerate locally)
+android/
+ios/
+
+# Misc
+*.local
+.cache/
