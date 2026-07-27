@@ -330,9 +330,17 @@ export async function uploadMedia(
             );
             return;
           }
+          const body = (xhr.responseText || '').trimStart();
+          const isHtml =
+            body.startsWith('<!doctype') ||
+            body.startsWith('<!DOCTYPE') ||
+            body.startsWith('<html');
           reject(
             new Error(
-              `Upload failed (HTTP ${xhr.status}): server returned non-JSON. Check API logs.`,
+              isHtml
+                ? `Upload failed (HTTP ${xhr.status}): received HTML instead of JSON. ` +
+                    'Set VITE_API_URL to your backend origin in production and redeploy.'
+                : `Upload failed (HTTP ${xhr.status}): server returned non-JSON. Check API logs.`,
             ),
           );
           return;

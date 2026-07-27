@@ -89,7 +89,12 @@ export function StaffToolsPage() {
         },
         body: form,
       });
-      const json = await res.json();
+      const { parseApiJson } = await import('../../lib/api');
+      const json = await parseApiJson<{
+        data?: { imported?: number; updated?: number };
+        error?: string;
+        message?: string;
+      }>(res);
       if (!res.ok) throw new Error(json.error ?? json.message ?? 'Import failed');
       setMessage(
         `Import: ${json.data?.imported ?? 0} new, ${json.data?.updated ?? 0} updated`,

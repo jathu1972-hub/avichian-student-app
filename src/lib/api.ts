@@ -10,6 +10,54 @@ let refreshPromise: Promise<string | null> | null = null;
 
 const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 
+/**
+ * Parse fetch body as JSON. If the host returned HTML (Netlify SPA shell, 404 page),
+ * throw a clear production-deployment message instead of:
+ * Unexpected token '<' ... is not valid JSON
+ */
+export async function parseApiJson<T = Record<string, unknown>>(res: Response): Promise<T> {
+  const contentType = res.headers.get('content-type') ?? '';
+  const text = await res.text();
+  const trimmed = text.trimStart();
+  const looksHtml =
+    trimmed.startsWith('<!doctype') ||
+    trimmed.startsWith('<!DOCTYPE') ||
+    trimmed.startsWith('<html') ||
+    contentType.includes('text/html');
+
+  if (looksHtml) {
+    throw new Error(
+      `Expected JSON from the API but received HTML (HTTP ${res.status}). ` +
+        `The browser likely hit the Netlify SPA instead of Express. ` +
+        `Fix: set VITE_API_URL to your backend origin (e.g. https://api.avichian.in) ` +
+        `in Netlify Environment variables and Redeploy. Current API base: ${apiBase()}`,
+    );
+  }
+
+  if (!trimmed) {
+    if (!res.ok) {
+      throw new Error(`Empty response from API (HTTP ${res.status})`);
+    }
+    return {} as T;
+  }
+
+  if (!contentType.includes('application/json') && !trimmed.startsWith('{') && !trimmed.startsWith('[')) {
+    throw new Error(
+      `Expected JSON from the API (HTTP ${res.status}, Content-Type: ${contentType || 'missing'}). ` +
+        `Body starts with: ${trimmed.slice(0, 100)}. API base: ${apiBase()}`,
+    );
+  }
+
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    throw new Error(
+      `Invalid JSON from API (HTTP ${res.status}). Body starts with: ${trimmed.slice(0, 100)}. ` +
+        `API base: ${apiBase()}`,
+    );
+  }
+}
+
 function readCsrfCookie(): string | null {
   if (typeof document === 'undefined') return null;
   // Only works same-origin (Vite proxy). Cross-origin uses csrfTokenCache from API JSON body.
@@ -31,14 +79,17 @@ export async function prefetchCsrfToken(): Promise<string> {
     res = await fetch(`${apiBase()}/csrf-token`, { credentials: 'include' });
   } catch {
     throw new Error(
-      'Cannot reach the API (Failed to fetch). Start the backend on port 4000, or check VITE_API_URL.',
+      'Cannot reach the API (Failed to fetch). Start the backend on port 4000, or set VITE_API_URL to your production API origin.',
     );
   }
+  const json = await parseApiJson<{ data?: { csrfToken?: string }; error?: string }>(res);
   if (!res.ok) {
-    throw new Error(`Could not get CSRF token (HTTP ${res.status}). Is the API running?`);
+    throw new Error(
+      json.error ??
+        `Could not get CSRF token (HTTP ${res.status}). Is the API running at ${apiBase()}?`,
+    );
   }
-  const json = await res.json().catch(() => ({}));
-  const token = json?.data?.csrfToken as string | undefined;
+  const token = json?.data?.csrfToken;
   if (!token) {
     throw new Error('CSRF token missing from API response');
   }
@@ -84,12 +135,15 @@ export async function refreshAccessToken(): Promise<string | null> {
           headers: { 'X-CSRF-Token': csrf },
         });
         if (!res.ok) return null;
-        const json = await res.json();
+        const json = await parseApiJson<{
+          data?: { accessToken?: string; csrfToken?: string };
+        }>(res);
+        if (!json.data?.accessToken) return null;
         setAccessToken(json.data.accessToken);
         if (json.data.csrfToken) {
           setCsrfToken(json.data.csrfToken);
         }
-        return json.data.accessToken as string;
+        return json.data.accessToken;
       } catch {
         return null;
       } finally {
@@ -136,14 +190,18 @@ export async function api<T>(
     });
   } catch {
     throw new Error(
-      'Network error (Failed to fetch). The API may be offline — start backend on :4000 or check CORS / VITE_API_URL.',
+      'Network error (Failed to fetch). The API may be offline, blocked by CORS, or VITE_API_URL is wrong. ' +
+        `Current API base: ${apiBase()}`,
     );
   }
 
-  const json = await res.json().catch(() => ({
-    success: false,
-    error: `Invalid response from API (HTTP ${res.status})`,
-  }));
+  const json = await parseApiJson<{
+    success?: boolean;
+    data?: T & { csrfToken?: string };
+    error?: string;
+    message?: string;
+    code?: string;
+  }>(res);
 
   if (
     res.status === 403 &&
@@ -167,12 +225,16 @@ export async function api<T>(
   }
 
   if (!res.ok) {
-    throw new Error(json.error ?? 'Request failed');
+    throw new Error(
+      (typeof json.error === 'string' && json.error) ||
+        (typeof json.message === 'string' && json.message) ||
+        `Request failed (HTTP ${res.status})`,
+    );
   }
 
-  if (json.data?.csrfToken) {
-    setCsrfToken(json.data.csrfToken);
+  if (json.data && typeof json.data === 'object' && 'csrfToken' in json.data && json.data.csrfToken) {
+    setCsrfToken(json.data.csrfToken as string);
   }
 
-  return json;
+  return json as { success: boolean; data?: T; error?: string; message?: string; code?: string };
 }

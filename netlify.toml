@@ -1,9 +1,6 @@
-# Student App — monorepo Netlify site
-# Base directory in Netlify UI: apps/student-app
-# Or connect standalone repo: https://github.com/jathu1972-hub/avichian-student-app
-
+﻿# Student App (standalone repo)
 [build]
-  command = "cd ../.. && npm ci && npm run build -w @avichian/shared && npm run build -w @avichian/student-app"
+  command = "npm ci && npm run build"
   publish = "dist"
 
 [build.environment]
