@@ -29,7 +29,7 @@ export async function parseApiJson<T = Record<string, unknown>>(res: Response): 
     throw new Error(
       `Expected JSON from the API but received HTML (HTTP ${res.status}). ` +
         `The browser likely hit the Netlify SPA instead of Express. ` +
-        `Fix: set VITE_API_URL to your backend origin (e.g. https://api.avichian.in) ` +
+        `Fix: set VITE_API_URL to your backend origin (e.g. https://api.avichian.com) ` +
         `in Netlify Environment variables and Redeploy. Current API base: ${apiBase()}`,
     );
   }

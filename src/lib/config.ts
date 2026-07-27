@@ -3,7 +3,7 @@
  *
  * Development: empty VITE_API_URL → relative `/api` via Vite proxy to localhost:4000.
  * Production (Netlify): MUST set VITE_API_URL to the backend origin, e.g.
- *   VITE_API_URL=https://api.avichian.in
+ *   VITE_API_URL=https://api.avichian.com
  * (no trailing slash; optional trailing /api is stripped).
  *
  * Never put secrets in VITE_* variables.
@@ -54,7 +54,7 @@ export function getApiOrigin(): string {
 /**
  * Base path for REST calls.
  * Local: `/api`
- * Prod: `https://api.avichian.in/api`
+ * Prod: `https://api.avichian.com/api`
  */
 export function getApiBase(): string {
   const origin = getApiOrigin();
