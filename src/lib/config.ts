@@ -32,6 +32,15 @@ let configLoaded = false;
 export async function loadRuntimeConfig(): Promise<void> {
   if (configLoaded) return;
   configLoaded = true;
+
+  // Local Vite always uses the /api proxy → backend :4000.
+  // Ignoring public/config.json here prevents a dead Cloudflare tunnel from
+  // breaking login when the API is running on this machine.
+  if (import.meta.env.DEV && !isHostedStaticFrontend()) {
+    console.info('[AVICHIAN] Dev mode: using Vite /api proxy (localhost:4000)');
+    return;
+  }
+
   try {
     const base = import.meta.env.BASE_URL || '/';
     const url = `${base}config.json?v=${Date.now()}`;
