@@ -37,7 +37,9 @@ export async function loadRuntimeConfig(): Promise<void> {
     const url = `${base}config.json?v=${Date.now()}`;
     const res = await fetch(url, { cache: 'no-store' });
     if (!res.ok) return;
-    const json = (await res.json()) as { apiUrl?: string; VITE_API_URL?: string };
+    // Strip BOM if static host/editor rewrote UTF-8 with BOM
+    const text = (await res.text()).replace(/^\uFEFF/, '');
+    const json = JSON.parse(text) as { apiUrl?: string; VITE_API_URL?: string };
     const raw = json.apiUrl || json.VITE_API_URL;
     if (raw && raw.trim()) {
       runtimeApiOrigin = normalizeApiOrigin(raw);
