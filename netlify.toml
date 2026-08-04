@@ -1,4 +1,13 @@
-﻿# Student App (standalone repo)
+# AVICHIAN Student App — permanent Netlify SPA
+# Site: connect GitHub repo jathu1972-hub/avichian-student-app
+# Permanent URL (after deploy): https://avichian-student-app.netlify.app
+# Custom domain (optional):    https://app.avichian.com
+#
+# REQUIRED env (Site settings → Environment variables → Redeploy):
+#   VITE_API_URL = https://YOUR-BACKEND-HOST
+#   Example: https://avichian-api.onrender.com
+#   or:      https://api.avichian.com
+
 [build]
   command = "npm ci && npm run build"
   publish = "dist"
@@ -6,6 +15,7 @@
 [build.environment]
   NODE_VERSION = "20"
 
+# SPA routes — do NOT host Express here
 [[redirects]]
   from = "/*"
   to = "/index.html"
