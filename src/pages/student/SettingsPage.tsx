@@ -10,6 +10,7 @@ import {
   LogOut,
   Moon,
   Palette,
+  Phone,
   Search,
   Shield,
   Smartphone,
@@ -18,6 +19,7 @@ import {
   X,
   KeyRound,
   Monitor,
+  Volume2,
 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
@@ -34,12 +36,21 @@ import {
   updateNotifications,
   updatePrivacy,
 } from '../../lib/settings';
+import {
+  getRingtoneDisplayName,
+  isRingtoneEnabled,
+  isVibrateEnabled,
+  setRingtoneEnabled,
+  setVibrateEnabled,
+  testIncomingRingtone,
+} from '../../lib/ringtone';
 import { PasswordHint } from '../LoginPage';
 
 type SectionId =
   | 'account'
   | 'privacy'
   | 'notifications'
+  | 'calls'
   | 'appearance'
   | 'security'
   | 'storage'
@@ -67,7 +78,8 @@ type SettingsSection = {
   icon: typeof User;
   accent: string;
   rows: SettingsRow[];
-  custom?: 'appearance' | 'storage';
+  custom?: 'appearance' | 'storage' | 'calls';
+  keywords?: string;
 };
 
 export function SettingsPage() {
@@ -80,6 +92,9 @@ export function SettingsPage() {
   const [query, setQuery] = useState('');
   const [logoutOpen, setLogoutOpen] = useState(false);
   const [logoutAllOpen, setLogoutAllOpen] = useState(false);
+  const [ringtoneOn, setRingtoneOn] = useState(() => isRingtoneEnabled());
+  const [vibrateOn, setVibrateOn] = useState(() => isVibrateEnabled());
+  const [ringtoneTestMsg, setRingtoneTestMsg] = useState('');
   const [passwordOpen, setPasswordOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [history, setHistory] = useState<
@@ -385,6 +400,15 @@ export function SettingsPage() {
         })),
       },
       {
+        id: 'calls' as SectionId,
+        title: 'Call Settings',
+        icon: Phone,
+        accent: 'from-emerald-500 to-green-600',
+        rows: [],
+        custom: 'calls' as const,
+        keywords: 'ringtone call voice video vibration incoming',
+      },
+      {
         id: 'appearance' as SectionId,
         title: 'Appearance',
         icon: Palette,
@@ -594,6 +618,105 @@ export function SettingsPage() {
                   {section.title}
                 </h2>
               </div>
+
+              {section.custom === 'calls' ? (
+                <div className="space-y-1 p-2">
+                  <div className="flex items-center gap-3 px-3 py-3.5">
+                    <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-emerald-500/10 text-emerald-600">
+                      <Volume2 size={18} />
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <p className="text-sm font-semibold text-slate-900 dark:text-white">
+                        Incoming Ringtone
+                      </p>
+                      <p className="text-xs text-slate-400">
+                        Current: {getRingtoneDisplayName()}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex items-center justify-between gap-3 px-3 py-3">
+                    <div>
+                      <p className="text-sm font-semibold text-slate-900 dark:text-white">
+                        Enable ringtone
+                      </p>
+                      <p className="text-xs text-slate-400">Play sound on incoming calls</p>
+                    </div>
+                    <button
+                      type="button"
+                      role="switch"
+                      aria-checked={ringtoneOn}
+                      onClick={() => {
+                        const next = !ringtoneOn;
+                        setRingtoneOn(next);
+                        setRingtoneEnabled(next);
+                      }}
+                      className={`relative h-7 w-12 rounded-full transition ${
+                        ringtoneOn ? 'bg-primary' : 'bg-slate-300 dark:bg-slate-600'
+                      }`}
+                    >
+                      <span
+                        className={`absolute top-0.5 h-6 w-6 rounded-full bg-white shadow transition ${
+                          ringtoneOn ? 'left-5' : 'left-0.5'
+                        }`}
+                      />
+                    </button>
+                  </div>
+                  <div className="flex items-center justify-between gap-3 px-3 py-3">
+                    <div>
+                      <p className="text-sm font-semibold text-slate-900 dark:text-white">
+                        Vibration
+                      </p>
+                      <p className="text-xs text-slate-400">Vibrate on mobile devices</p>
+                    </div>
+                    <button
+                      type="button"
+                      role="switch"
+                      aria-checked={vibrateOn}
+                      onClick={() => {
+                        const next = !vibrateOn;
+                        setVibrateOn(next);
+                        setVibrateEnabled(next);
+                      }}
+                      className={`relative h-7 w-12 rounded-full transition ${
+                        vibrateOn ? 'bg-primary' : 'bg-slate-300 dark:bg-slate-600'
+                      }`}
+                    >
+                      <span
+                        className={`absolute top-0.5 h-6 w-6 rounded-full bg-white shadow transition ${
+                          vibrateOn ? 'left-5' : 'left-0.5'
+                        }`}
+                      />
+                    </button>
+                  </div>
+                  <div className="px-3 pb-3 pt-1">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        void testIncomingRingtone(2800)
+                          .then(() => {
+                            setRingtoneTestMsg('Playing…');
+                            window.setTimeout(() => setRingtoneTestMsg(''), 3000);
+                          })
+                          .catch((err) => {
+                            setRingtoneTestMsg(
+                              err instanceof Error ? err.message : 'Could not play ringtone',
+                            );
+                          });
+                      }}
+                      className="flex min-h-11 w-full items-center justify-center gap-2 rounded-2xl bg-primary/10 text-sm font-semibold text-primary"
+                    >
+                      <Phone size={16} /> Test ringtone
+                    </button>
+                    {ringtoneTestMsg ? (
+                      <p className="mt-2 text-center text-xs text-slate-500">{ringtoneTestMsg}</p>
+                    ) : (
+                      <p className="mt-2 text-center text-[11px] text-slate-400">
+                        Volume follows your device volume
+                      </p>
+                    )}
+                  </div>
+                </div>
+              ) : null}
 
               {section.custom === 'appearance' && data ? (
                 <div className="grid grid-cols-3 gap-2 p-4">

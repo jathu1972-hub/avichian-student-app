@@ -142,7 +142,7 @@ export async function createStoryWithUpload(
     xhr.onerror = () =>
       reject(
         new Error(
-          'Network error creating story (Failed to fetch). Start the backend: npm run dev -w backend',
+          'Unable to connect to the server. Please try again later.',
         ),
       );
     xhr.ontimeout = () => reject(new Error('Story upload timed out'));
@@ -273,7 +273,7 @@ export async function uploadMedia(
       throw new Error(
         e instanceof Error
           ? e.message
-          : 'Cannot get CSRF token — API may be offline on port 4000.',
+          : 'Unable to connect to the server. Please try again later.',
       );
     }
 
@@ -325,7 +325,7 @@ export async function uploadMedia(
           if (xhr.status === 0) {
             reject(
               new Error(
-                'Upload failed: no response from API. Is the backend running on port 4000?',
+                'Unable to connect to the server. Please try again later.',
               ),
             );
             return;
@@ -339,7 +339,7 @@ export async function uploadMedia(
             new Error(
               isHtml
                 ? `Upload failed (HTTP ${xhr.status}): received HTML instead of JSON. ` +
-                    'Set VITE_API_URL to your backend origin in production and redeploy.'
+                    'Unable to connect to the server. Please try again later.'
                 : `Upload failed (HTTP ${xhr.status}): server returned non-JSON. Check API logs.`,
             ),
           );
@@ -389,7 +389,7 @@ export async function uploadMedia(
       xhr.onerror = () =>
         reject(
           new Error(
-            'Network error during upload (Failed to fetch). Start the API: npm run dev -w backend (port 4000).',
+            'Unable to connect to the server. Please try again later.',
           ),
         );
       xhr.ontimeout = () =>
@@ -718,7 +718,7 @@ export async function createReelWithUpload(params: {
         xhr.onerror = () =>
           reject(
             new Error(
-              'Network error uploading reel (Failed to fetch). Ensure API is running on port 4000.',
+              'Unable to connect to the server. Please try again later.',
             ),
           );
         xhr.ontimeout = () => reject(new Error('Reel upload timed out'));

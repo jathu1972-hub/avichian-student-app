@@ -24,8 +24,22 @@ jobs:
         env:
           GITHUB_PAGES: "true"
           VITE_BASE: /avichian-student-app/
+          # Prefer public/config.json at runtime. Optional repo variable:
           VITE_API_URL: ${{ vars.VITE_API_URL }}
         run: npm run build
+      - name: Ensure production config.json (never localhost)
+        run: |
+          if [ -n "${{ vars.VITE_API_URL }}" ]; then
+            ORIGIN=$(echo "${{ vars.VITE_API_URL }}" | sed -E 's#/api/?$##')
+            printf '{\n  "apiUrl": "%s"\n}\n' "$ORIGIN" > dist/config.json
+          fi
+          # Refuse loopback in shipped config
+          if grep -qiE 'localhost|127\.0\.0\.1' dist/config.json 2>/dev/null; then
+            echo "ERROR: production config.json must not contain localhost" >&2
+            cat dist/config.json
+            exit 1
+          fi
+          cat dist/config.json
       - name: SPA fallback
         run: cp dist/index.html dist/404.html
       - uses: actions/upload-pages-artifact@v3

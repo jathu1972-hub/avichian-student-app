@@ -1,6 +1,6 @@
-import { getApiBase } from './config';
+import { API_UNREACHABLE_MESSAGE, getApiBase, isProductionFrontend } from './config';
 
-/** REST base: `/api` (dev proxy) or `https://api.avichian.in/api` (production). */
+/** REST base: `/api` (dev proxy) or `https://api…/api` (production). */
 function apiBase(): string {
   return getApiBase();
 }
@@ -10,10 +10,14 @@ let refreshPromise: Promise<string | null> | null = null;
 
 const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 
+function networkErrorMessage(): string {
+  if (isProductionFrontend()) return API_UNREACHABLE_MESSAGE;
+  // Developers only (never shown on github.io)
+  return `${API_UNREACHABLE_MESSAGE} (dev: is the API reachable and is VITE_API_URL / Vite proxy correct?)`;
+}
+
 /**
- * Parse fetch body as JSON. If the host returned HTML (Netlify SPA shell, 404 page),
- * throw a clear production-deployment message instead of:
- * Unexpected token '<' ... is not valid JSON
+ * Parse fetch body as JSON. Rejects HTML/SPA shells with a clear message.
  */
 export async function parseApiJson<T = Record<string, unknown>>(res: Response): Promise<T> {
   const contentType = res.headers.get('content-type') ?? '';
@@ -26,11 +30,22 @@ export async function parseApiJson<T = Record<string, unknown>>(res: Response): 
     contentType.includes('text/html');
 
   if (looksHtml) {
+    console.error('[AVICHIAN] API returned HTML instead of JSON', {
+      status: res.status,
+      contentType,
+      preview: trimmed.slice(0, 200),
+      apiBase: (() => {
+        try {
+          return apiBase();
+        } catch {
+          return '(unconfigured)';
+        }
+      })(),
+    });
     throw new Error(
-      `Expected JSON from the API but received HTML (HTTP ${res.status}). ` +
-        `The browser likely hit the Netlify SPA instead of Express. ` +
-        `Fix: set VITE_API_URL to your backend origin (e.g. https://api.avichian.com) ` +
-        `in Netlify Environment variables and Redeploy. Current API base: ${apiBase()}`,
+      isProductionFrontend()
+        ? API_UNREACHABLE_MESSAGE
+        : `Expected JSON from the API but received HTML (HTTP ${res.status}). Check VITE_API_URL / reverse proxy.`,
     );
   }
 
@@ -42,25 +57,30 @@ export async function parseApiJson<T = Record<string, unknown>>(res: Response): 
   }
 
   if (!contentType.includes('application/json') && !trimmed.startsWith('{') && !trimmed.startsWith('[')) {
+    console.error('[AVICHIAN] Unexpected API body', {
+      status: res.status,
+      contentType,
+      preview: trimmed.slice(0, 200),
+    });
     throw new Error(
-      `Expected JSON from the API (HTTP ${res.status}, Content-Type: ${contentType || 'missing'}). ` +
-        `Body starts with: ${trimmed.slice(0, 100)}. API base: ${apiBase()}`,
+      isProductionFrontend()
+        ? API_UNREACHABLE_MESSAGE
+        : `Expected JSON from the API (HTTP ${res.status}). Body starts with: ${trimmed.slice(0, 80)}`,
     );
   }
 
   try {
     return JSON.parse(text) as T;
   } catch {
+    console.error('[AVICHIAN] Invalid JSON', { status: res.status, preview: trimmed.slice(0, 200) });
     throw new Error(
-      `Invalid JSON from API (HTTP ${res.status}). Body starts with: ${trimmed.slice(0, 100)}. ` +
-        `API base: ${apiBase()}`,
+      isProductionFrontend() ? API_UNREACHABLE_MESSAGE : `Invalid JSON from API (HTTP ${res.status})`,
     );
   }
 }
 
 function readCsrfCookie(): string | null {
   if (typeof document === 'undefined') return null;
-  // Only works same-origin (Vite proxy). Cross-origin uses csrfTokenCache from API JSON body.
   const match = document.cookie.match(/(?:^|;\s*)csrf_token=([^;]*)/);
   return match ? decodeURIComponent(match[1]) : null;
 }
@@ -77,16 +97,14 @@ export async function prefetchCsrfToken(): Promise<string> {
   let res: Response;
   try {
     res = await fetch(`${apiBase()}/csrf-token`, { credentials: 'include' });
-  } catch {
-    throw new Error(
-      'Cannot reach the API (Failed to fetch). Start the backend on port 4000, or set VITE_API_URL to your production API origin.',
-    );
+  } catch (err) {
+    console.error('[AVICHIAN] CSRF fetch failed', err);
+    throw new Error(networkErrorMessage());
   }
   const json = await parseApiJson<{ data?: { csrfToken?: string }; error?: string }>(res);
   if (!res.ok) {
     throw new Error(
-      json.error ??
-        `Could not get CSRF token (HTTP ${res.status}). Is the API running at ${apiBase()}?`,
+      (typeof json.error === 'string' && json.error) || networkErrorMessage(),
     );
   }
   const token = json?.data?.csrfToken;
@@ -108,7 +126,6 @@ async function ensureCsrf(forceRefresh = false): Promise<string> {
       return csrfTokenCache;
     }
   }
-
   return prefetchCsrfToken();
 }
 
@@ -188,11 +205,13 @@ export async function api<T>(
       credentials: 'include',
       headers,
     });
-  } catch {
-    throw new Error(
-      'Network error (Failed to fetch). The API may be offline, blocked by CORS, or VITE_API_URL is wrong. ' +
-        `Current API base: ${apiBase()}`,
-    );
+  } catch (err) {
+    console.error('[AVICHIAN] Network error', path, err);
+    throw new Error(networkErrorMessage());
+  }
+
+  if (!res.ok) {
+    // Still parse body for structured errors when possible
   }
 
   const json = await parseApiJson<{

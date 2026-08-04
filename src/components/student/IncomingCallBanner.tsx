@@ -2,7 +2,9 @@ import { Phone, PhoneOff, Video } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { updateCallStatus } from '../../lib/calls';
+import { startIncomingRingtone, stopIncomingRingtone } from '../../lib/ringtone';
 import { connectSocket } from '../../lib/socket';
+import { StudentAvatar } from './StudentAvatar';
 
 interface IncomingInvite {
   callId: string;
@@ -11,6 +13,7 @@ interface IncomingInvite {
   fromName: string;
   fromPhoto?: string | null;
   roomName?: string;
+  fromDepartment?: string | null;
 }
 
 const AUTO_MISS_MS = 45_000;
@@ -18,47 +21,69 @@ const AUTO_MISS_MS = 45_000;
 export function IncomingCallBanner() {
   const navigate = useNavigate();
   const [invite, setInvite] = useState<IncomingInvite | null>(null);
+  const [missedToast, setMissedToast] = useState<string | null>(null);
   const ringRef = useRef<number | null>(null);
+  const activeCallIdRef = useRef<string | null>(null);
+  const missedToastTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
     const socket = connectSocket();
 
-    function clearRing() {
+    function clearMissTimer() {
       if (ringRef.current) {
         window.clearTimeout(ringRef.current);
         ringRef.current = null;
       }
     }
 
+    function showMissed(name: string) {
+      setMissedToast(`Missed Call from ${name}`);
+      if (missedToastTimerRef.current) window.clearTimeout(missedToastTimerRef.current);
+      missedToastTimerRef.current = window.setTimeout(() => {
+        setMissedToast(null);
+        missedToastTimerRef.current = null;
+      }, 4500);
+    }
+
+    function dismissInvite(callId?: string) {
+      setInvite((cur) => {
+        if (!cur) return null;
+        if (callId && cur.callId !== callId) return cur;
+        return null;
+      });
+      if (!callId || activeCallIdRef.current === callId) {
+        stopIncomingRingtone();
+        clearMissTimer();
+        activeCallIdRef.current = null;
+      }
+    }
+
     function presentInvite(next: IncomingInvite) {
-      if (window.location.pathname.includes('/home/call/')) return;
+      // HashRouter: path may be after # — also check hash
+      const path = window.location.pathname + window.location.hash;
+      if (path.includes('/home/call/') || path.includes('#/home/call/')) return;
       if (!next.callId || !next.fromUserId) return;
 
-      setInvite(next);
-
-      // Soft ring (Web Audio)
-      try {
-        const ctx = new AudioContext();
-        const osc = ctx.createOscillator();
-        const gain = ctx.createGain();
-        osc.frequency.value = 440;
-        gain.gain.value = 0.06;
-        osc.connect(gain);
-        gain.connect(ctx.destination);
-        osc.start();
-        window.setTimeout(() => {
-          try {
-            osc.stop();
-            void ctx.close();
-          } catch {
-            /* ignore */
-          }
-        }, 900);
-      } catch {
-        /* ignore */
+      // Already ringing this call (dual-channel invite must not restart ring/timer)
+      if (activeCallIdRef.current === next.callId) {
+        setInvite((cur) => {
+          if (!cur || cur.callId !== next.callId) return next;
+          return {
+            ...cur,
+            fromName: next.fromName || cur.fromName,
+            fromPhoto: next.fromPhoto ?? cur.fromPhoto,
+            fromDepartment: next.fromDepartment ?? cur.fromDepartment,
+            roomName: next.roomName || cur.roomName,
+          };
+        });
+        return;
       }
 
-      if (ringRef.current) window.clearTimeout(ringRef.current);
+      activeCallIdRef.current = next.callId;
+      setInvite(next);
+      void startIncomingRingtone();
+
+      clearMissTimer();
       ringRef.current = window.setTimeout(() => {
         setInvite((cur) => {
           if (cur?.callId === next.callId) {
@@ -75,11 +100,14 @@ export function IncomingCallBanner() {
               type: next.callType,
               signal: { type: 'hangup', reason: 'MISSED' },
             });
-            clearRing();
+            stopIncomingRingtone();
+            activeCallIdRef.current = null;
+            showMissed(next.fromName || 'Friend');
             return null;
           }
           return cur;
         });
+        clearMissTimer();
       }, AUTO_MISS_MS);
     }
 
@@ -94,18 +122,13 @@ export function IncomingCallBanner() {
         fromUserId?: string;
         fromName?: string;
         fromPhoto?: string | null;
+        fromDepartment?: string | null;
         roomName?: string;
       };
     }) {
       const signal = payload.signal;
       if (signal?.type === 'hangup' || signal?.type === 'reject') {
-        setInvite((cur) => {
-          if (cur && (cur.callId === payload.callId || cur.fromUserId === payload.fromUserId)) {
-            clearRing();
-            return null;
-          }
-          return cur;
-        });
+        dismissInvite(payload.callId || signal.callId);
         return;
       }
       if (signal?.type !== 'invite') return;
@@ -116,6 +139,7 @@ export function IncomingCallBanner() {
         fromUserId: signal.fromUserId || payload.fromUserId,
         fromName: signal.fromName || 'Friend',
         fromPhoto: signal.fromPhoto,
+        fromDepartment: signal.fromDepartment,
         roomName: signal.roomName,
       });
     }
@@ -126,6 +150,7 @@ export function IncomingCallBanner() {
       callType: string;
       fromName?: string;
       fromPhoto?: string | null;
+      fromDepartment?: string | null;
       roomName?: string;
     }) {
       presentInvite({
@@ -134,6 +159,7 @@ export function IncomingCallBanner() {
         fromUserId: payload.fromUserId,
         fromName: payload.fromName || 'Friend',
         fromPhoto: payload.fromPhoto,
+        fromDepartment: payload.fromDepartment,
         roomName: payload.roomName,
       });
     }
@@ -141,25 +167,30 @@ export function IncomingCallBanner() {
     socket.on('call:signal', onSignal);
     socket.on('callInvitation', onInvitation);
 
-    // Re-bind after reconnect (token refresh)
-    socket.on('connect', () => {
-      /* listeners already attached */
-    });
-
     return () => {
-      clearRing();
+      clearMissTimer();
+      stopIncomingRingtone();
+      activeCallIdRef.current = null;
+      if (missedToastTimerRef.current) {
+        window.clearTimeout(missedToastTimerRef.current);
+        missedToastTimerRef.current = null;
+      }
       socket.off('call:signal', onSignal);
       socket.off('callInvitation', onInvitation);
     };
   }, []);
 
-  if (!invite) return null;
-
   async function accept() {
     const i = invite;
     if (!i) return;
+    stopIncomingRingtone();
+    if (ringRef.current) {
+      window.clearTimeout(ringRef.current);
+      ringRef.current = null;
+    }
+    activeCallIdRef.current = null;
     setInvite(null);
-    if (ringRef.current) window.clearTimeout(ringRef.current);
+
     const mode = i.callType === 'VIDEO' ? 'video' : 'voice';
     const socket = connectSocket();
     socket.emit('callAccepted', { toUserId: i.fromUserId, callId: i.callId });
@@ -178,8 +209,14 @@ export function IncomingCallBanner() {
   async function reject() {
     const i = invite;
     if (!i) return;
+    stopIncomingRingtone();
+    if (ringRef.current) {
+      window.clearTimeout(ringRef.current);
+      ringRef.current = null;
+    }
+    activeCallIdRef.current = null;
     setInvite(null);
-    if (ringRef.current) window.clearTimeout(ringRef.current);
+
     const socket = connectSocket();
     socket.emit('callRejected', { toUserId: i.fromUserId, callId: i.callId });
     socket.emit('call:signal', {
@@ -198,34 +235,76 @@ export function IncomingCallBanner() {
   }
 
   return (
-    <div className="fixed inset-x-0 top-0 z-[100] flex justify-center p-3 pt-safe">
-      <div className="flex w-full max-w-md items-center gap-3 rounded-2xl bg-slate-900 px-4 py-3 text-white shadow-float">
-        <div className="rounded-full bg-success/20 p-2 text-success">
-          {invite.callType === 'VIDEO' ? <Video size={20} /> : <Phone size={20} />}
+    <>
+      {missedToast ? (
+        <div className="pointer-events-none fixed inset-x-0 top-safe z-[110] flex justify-center px-4 pt-3">
+          <div className="rounded-2xl border border-white/15 bg-slate-900/90 px-4 py-3 text-sm font-semibold text-white shadow-float backdrop-blur-md">
+            {missedToast}
+          </div>
         </div>
-        <div className="min-w-0 flex-1">
-          <p className="truncate text-sm font-semibold">{invite.fromName}</p>
-          <p className="text-xs text-white/60">
-            Incoming {invite.callType === 'VIDEO' ? 'video' : 'voice'} call
-          </p>
+      ) : null}
+
+      {invite ? (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/65 p-4 backdrop-blur-xl pt-safe pb-safe">
+          <div className="w-full max-w-sm overflow-hidden rounded-[32px] border border-white/20 bg-white/10 p-7 text-white shadow-float backdrop-blur-2xl">
+            <div className="pointer-events-none absolute inset-0 bg-gradient-to-b from-emerald-500/10 via-transparent to-slate-950/40" />
+            <div className="relative flex flex-col items-center text-center">
+              <div className="relative mb-5">
+                <div className="absolute -inset-3 animate-ping rounded-full bg-emerald-400/25" />
+                <div className="absolute -inset-1 animate-pulse rounded-full bg-emerald-400/15" />
+                <div className="relative scale-125 rounded-full ring-4 ring-emerald-400/50 shadow-lg shadow-emerald-500/20">
+                  <StudentAvatar name={invite.fromName} photoUrl={invite.fromPhoto} size="lg" />
+                </div>
+              </div>
+              <p className="font-display text-2xl font-bold tracking-tight">{invite.fromName}</p>
+              {invite.fromDepartment ? (
+                <p className="mt-1 text-xs text-white/55">{invite.fromDepartment}</p>
+              ) : null}
+              <p className="mt-3 flex items-center gap-2 text-sm font-semibold text-emerald-300">
+                {invite.callType === 'VIDEO' ? <Video size={16} /> : <Phone size={16} />}
+                Incoming {invite.callType === 'VIDEO' ? 'Video' : 'Voice'} Call
+              </p>
+              <div className="mt-3 flex items-center gap-1.5">
+                <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-400" />
+                <span
+                  className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-400"
+                  style={{ animationDelay: '150ms' }}
+                />
+                <span
+                  className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-400"
+                  style={{ animationDelay: '300ms' }}
+                />
+                <span className="ml-1 text-[11px] text-white/45">Ringtone playing</span>
+              </div>
+            </div>
+
+            <div className="relative mt-10 flex items-center justify-center gap-10">
+              <button
+                type="button"
+                onClick={() => void reject()}
+                className="flex flex-col items-center gap-2"
+                aria-label="Decline"
+              >
+                <span className="flex h-16 w-16 items-center justify-center rounded-full bg-rose-500 shadow-lg shadow-rose-500/40 ring-1 ring-white/10">
+                  <PhoneOff size={28} />
+                </span>
+                <span className="text-xs font-medium text-white/75">Decline</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => void accept()}
+                className="flex flex-col items-center gap-2"
+                aria-label="Accept"
+              >
+                <span className="flex h-16 w-16 items-center justify-center rounded-full bg-emerald-500 shadow-lg shadow-emerald-500/40 ring-1 ring-white/10">
+                  <Phone size={28} />
+                </span>
+                <span className="text-xs font-medium text-white/75">Accept</span>
+              </button>
+            </div>
+          </div>
         </div>
-        <button
-          type="button"
-          onClick={() => void reject()}
-          className="rounded-full bg-error p-2.5"
-          aria-label="Decline"
-        >
-          <PhoneOff size={18} />
-        </button>
-        <button
-          type="button"
-          onClick={() => void accept()}
-          className="rounded-full bg-success p-2.5"
-          aria-label="Accept"
-        >
-          <Phone size={18} />
-        </button>
-      </div>
-    </div>
+      ) : null}
+    </>
   );
 }

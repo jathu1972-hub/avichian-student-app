@@ -1,6 +1,7 @@
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { BrowserRouter, HashRouter } from 'react-router-dom';
+import { ApiConnectionBanner } from './components/ApiConnectionBanner';
 import { AuthProvider } from './context/AuthContext';
 import { loadRuntimeConfig } from './lib/config';
 import App from './App';
@@ -17,6 +18,7 @@ async function bootstrap() {
   createRoot(document.getElementById('root')!).render(
     <StrictMode>
       <Router {...(useHash ? {} : { basename: basename || '/' })}>
+        <ApiConnectionBanner />
         <AuthProvider>
           <App />
         </AuthProvider>

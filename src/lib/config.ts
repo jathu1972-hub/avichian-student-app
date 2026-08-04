@@ -1,18 +1,32 @@
 /**
- * Frontend API / Socket configuration.
+ * AVICHIAN API configuration (student app).
  *
- * Resolution order for API origin:
- * 1. Runtime public/config.json → { "apiUrl": "https://your-api" }
- * 2. Build-time VITE_API_URL
- * 3. Dev only: relative /api (Vite proxy)
+ * Resolution order for API base (…/api):
+ * 1. Runtime public/config.json → { "apiUrl": "https://api.example.com" }
+ * 2. Build-time import.meta.env.VITE_API_URL
+ * 3. Development only: relative `/api` (Vite proxy → backend)
  *
- * Never put secrets in VITE_* variables.
+ * Production / GitHub Pages NEVER uses localhost or 127.0.0.1.
  */
 
 function stripTrailingSlash(url: string): string {
   return url.replace(/\/+$/, '');
 }
 
+/** True if URL points at loopback (forbidden in production browsers on public hosts). */
+export function isLoopbackUrl(url: string): boolean {
+  try {
+    const u = new URL(url.includes('://') ? url : `https://${url}`);
+    return u.hostname === 'localhost' || u.hostname === '127.0.0.1' || u.hostname === '::1';
+  } catch {
+    return /localhost|127\.0\.0\.1/i.test(url);
+  }
+}
+
+/**
+ * Normalize any configured value to an API origin without trailing /api.
+ * Accepts: https://api.example.com  OR  https://api.example.com/api
+ */
 export function normalizeApiOrigin(raw: string): string {
   let url = stripTrailingSlash(raw.trim());
   if (url.toLowerCase().endsWith('/api')) {
@@ -21,42 +35,10 @@ export function normalizeApiOrigin(raw: string): string {
   return url;
 }
 
-/** Set from public/config.json before first API call */
-let runtimeApiOrigin = '';
-let configLoaded = false;
-
-/**
- * Load optional runtime config (cache-busted). Safe to call multiple times.
- * Place file at: public/config.json → { "apiUrl": "https://api.example.com" }
- */
-export async function loadRuntimeConfig(): Promise<void> {
-  if (configLoaded) return;
-  configLoaded = true;
-
-  // Local Vite always uses the /api proxy → backend :4000.
-  // Ignoring public/config.json here prevents a dead Cloudflare tunnel from
-  // breaking login when the API is running on this machine.
-  if (import.meta.env.DEV && !isHostedStaticFrontend()) {
-    console.info('[AVICHIAN] Dev mode: using Vite /api proxy (localhost:4000)');
-    return;
-  }
-
-  try {
-    const base = import.meta.env.BASE_URL || '/';
-    const url = `${base}config.json?v=${Date.now()}`;
-    const res = await fetch(url, { cache: 'no-store' });
-    if (!res.ok) return;
-    // Strip BOM if static host/editor rewrote UTF-8 with BOM
-    const text = (await res.text()).replace(/^\uFEFF/, '');
-    const json = JSON.parse(text) as { apiUrl?: string; VITE_API_URL?: string };
-    const raw = json.apiUrl || json.VITE_API_URL;
-    if (raw && raw.trim()) {
-      runtimeApiOrigin = normalizeApiOrigin(raw);
-      console.info('[AVICHIAN] API origin from config.json:', runtimeApiOrigin);
-    }
-  } catch {
-    // optional file
-  }
+/** Full REST prefix ending with /api */
+export function toApiBase(originOrBase: string): string {
+  const origin = normalizeApiOrigin(originOrBase);
+  return `${origin}/api`;
 }
 
 function isHostedStaticFrontend(): boolean {
@@ -70,42 +52,102 @@ function isHostedStaticFrontend(): boolean {
   );
 }
 
-/** Origin of the API, e.g. https://api.example.com — empty only in local Vite dev. */
+export function isProductionFrontend(): boolean {
+  return Boolean(import.meta.env.PROD) || isHostedStaticFrontend();
+}
+
+let runtimeApiOrigin = '';
+let configLoaded = false;
+
+/**
+ * Load optional runtime config (cache-busted). Call once before first API request.
+ * public/config.json → { "apiUrl": "https://your-api-origin" }
+ */
+export async function loadRuntimeConfig(): Promise<void> {
+  if (configLoaded) return;
+  configLoaded = true;
+
+  // Local Vite: prefer proxy unless VITE_API_URL is set in .env.development
+  if (import.meta.env.DEV && !isHostedStaticFrontend()) {
+    const envUrl = (import.meta.env.VITE_API_URL as string | undefined)?.trim();
+    if (envUrl) {
+      const origin = normalizeApiOrigin(envUrl);
+      if (!isLoopbackUrl(origin) || import.meta.env.DEV) {
+        runtimeApiOrigin = origin;
+        console.info('[AVICHIAN] Dev API from VITE_API_URL:', runtimeApiOrigin);
+      }
+    } else {
+      console.info('[AVICHIAN] Dev mode: using Vite /api proxy');
+    }
+    return;
+  }
+
+  try {
+    const base = import.meta.env.BASE_URL || '/';
+    const res = await fetch(`${base}config.json?v=${Date.now()}`, { cache: 'no-store' });
+    if (!res.ok) {
+      console.warn('[AVICHIAN] config.json not found (HTTP', res.status, ')');
+      return;
+    }
+    const text = (await res.text()).replace(/^\uFEFF/, '');
+    const json = JSON.parse(text) as { apiUrl?: string; VITE_API_URL?: string };
+    const raw = json.apiUrl || json.VITE_API_URL;
+    if (raw?.trim()) {
+      const origin = normalizeApiOrigin(raw);
+      if (isProductionFrontend() && isLoopbackUrl(origin)) {
+        console.error(
+          '[AVICHIAN] config.json apiUrl points at localhost — browsers on public sites cannot use it. Use a public HTTPS API URL.',
+        );
+        return;
+      }
+      runtimeApiOrigin = origin;
+      console.info('[AVICHIAN] API origin from config.json:', runtimeApiOrigin);
+    }
+  } catch (err) {
+    console.warn('[AVICHIAN] config.json load failed', err);
+  }
+}
+
+/** Origin only, e.g. https://api.example.com — empty in pure Vite-proxy dev. */
 export function getApiOrigin(): string {
-  if (runtimeApiOrigin) return runtimeApiOrigin;
+  if (runtimeApiOrigin) {
+    if (isProductionFrontend() && isLoopbackUrl(runtimeApiOrigin)) {
+      console.error('[AVICHIAN] Refusing loopback API origin in production');
+      return '';
+    }
+    return runtimeApiOrigin;
+  }
 
   const raw = import.meta.env.VITE_API_URL as string | undefined;
-  if (raw && raw.trim()) {
+  if (raw?.trim()) {
     const origin = normalizeApiOrigin(raw);
-    if (import.meta.env.PROD && /localhost|127\.0\.0\.1/.test(origin) && isHostedStaticFrontend()) {
-      console.error('[AVICHIAN] VITE_API_URL points at localhost on a public site — browsers cannot reach it.');
+    if (isProductionFrontend() && isLoopbackUrl(origin)) {
+      console.error(
+        '[AVICHIAN] VITE_API_URL is localhost in production build — set a public HTTPS API URL and redeploy.',
+      );
+      return '';
     }
     return origin;
   }
 
-  if (import.meta.env.PROD || isHostedStaticFrontend()) {
+  if (isProductionFrontend()) {
     console.error(
-      '[AVICHIAN] No API URL configured. Set public/config.json { "apiUrl": "https://YOUR-API" } ' +
-        'or build with VITE_API_URL, then redeploy.',
+      '[AVICHIAN] No API URL configured. Set public/config.json { "apiUrl": "https://YOUR-API" } or VITE_API_URL.',
     );
   }
   return '';
 }
 
 /**
- * Base path for REST calls.
- * Local: `/api`  ·  Prod: `https://your-api/api`
+ * Base path for REST: `https://api…/api` or `/api` in local proxy dev.
  */
 export function getApiBase(): string {
   const origin = getApiOrigin();
   if (origin) return `${origin}/api`;
 
-  if (import.meta.env.PROD || isHostedStaticFrontend()) {
+  if (isProductionFrontend()) {
     throw new Error(
-      'API URL is not configured (would call relative /api and get HTML 404). ' +
-        'Set config.json apiUrl or VITE_API_URL to your Express backend origin ' +
-        '(Render / Railway / Cloudflare tunnel), then redeploy. ' +
-        'Local full stack: use http://localhost:5173 with backend on :4000.',
+      'Unable to connect to the server. The application is not configured with a production API URL.',
     );
   }
   return '/api';
@@ -136,3 +178,7 @@ export function resolveMediaUrl(url: string | null | undefined): string | null {
   }
   return url;
 }
+
+/** User-facing network error (never mentions localhost / ports). */
+export const API_UNREACHABLE_MESSAGE =
+  'Unable to connect to the server. Please try again later.';

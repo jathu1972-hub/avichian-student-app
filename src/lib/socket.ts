@@ -23,10 +23,19 @@ export function connectSocket(): Socket {
     return socket;
   }
 
+  // Token refresh: update auth only — do NOT removeAllListeners (would drop
+  // IncomingCallBanner / CallPage / Friends socket handlers).
   if (socket && lastToken !== token) {
-    socket.removeAllListeners();
-    socket.disconnect();
-    socket = null;
+    socket.auth = { token };
+    lastToken = token;
+    if (!socket.connected) {
+      socket.connect();
+    } else {
+      // Force reconnect with new JWT so server re-joins user room
+      socket.disconnect();
+      socket.connect();
+    }
+    return socket;
   }
 
   if (socket && !socket.connected) {
@@ -65,7 +74,7 @@ export function whenSocketConnected(timeoutMs = 8000): Promise<Socket> {
   return new Promise((resolve, reject) => {
     const t = window.setTimeout(() => {
       s.off('connect', onConnect);
-      reject(new Error('Socket connection timeout — check API / VITE_API_URL'));
+      reject(new Error('Unable to connect to the server. Please try again later.'));
     }, timeoutMs);
     function onConnect() {
       window.clearTimeout(t);
