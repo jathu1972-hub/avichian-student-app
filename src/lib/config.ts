@@ -58,7 +58,17 @@ export function getApiOrigin(): string {
  */
 export function getApiBase(): string {
   const origin = getApiOrigin();
-  return origin ? `${origin}/api` : '/api';
+  if (origin) return `${origin}/api`;
+  // Production build without VITE_API_URL must not call relative /api (returns HTML from the SPA host).
+  if (import.meta.env.PROD) {
+    throw new Error(
+      'VITE_API_URL is not configured in this production build. ' +
+        'Set the GitHub Actions variable (or Netlify env) VITE_API_URL to your Express backend origin ' +
+        '(e.g. https://avichian-api.onrender.com), then redeploy. ' +
+        'Relative /api only works in local Vite dev.',
+    );
+  }
+  return '/api';
 }
 
 /** True when the SPA is calling the API on another origin (Netlify → Railway/Render). */
