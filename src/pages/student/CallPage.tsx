@@ -83,7 +83,11 @@ export function CallPage({ mode }: { mode: 'voice' | 'video' }) {
   const remoteStreamRef = useRef<MediaStream | null>(null);
   const endedRef = useRef(false);
   const makingOfferRef = useRef(false);
+  const answeringRef = useRef(false);
+  const offerSentRef = useRef(false);
   const ignoreOfferRef = useRef(false);
+  const lastRemoteOfferKeyRef = useRef<string>('');
+  const lastRemoteAnswerKeyRef = useRef<string>('');
   const secondsRef = useRef(0);
   const connectedRef = useRef(false);
   const pendingIce = useRef<RTCIceCandidateInit[]>([]);
@@ -92,23 +96,39 @@ export function CallPage({ mode }: { mode: 'voice' | 'video' }) {
   const peerAcceptedRef = useRef(role === 'callee'); // callee is already accepted
   const iceConfigRef = useRef<CallIceConfig | null>(null);
 
+  function sdpKey(sdp: RTCSessionDescriptionInit | undefined): string {
+    return `${sdp?.type ?? ''}:${(sdp?.sdp ?? '').slice(0, 120)}`;
+  }
+
+  /** Only show user-facing errors when the call is not already connected. */
+  function reportSignalingIssue(err: unknown, context: string) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn(`[call] ${context}:`, msg, {
+      signalingState: pcRef.current?.signalingState,
+      connectionState: pcRef.current?.connectionState,
+    });
+    if (!connectedRef.current && !endedRef.current) {
+      // Keep messaging friendly — never dump raw WebRTC stack traces
+      if (/setLocalDescription|setRemoteDescription|wrong state/i.test(msg)) {
+        // Duplicate / late SDP is common; ignore for UI if media may still work
+        return;
+      }
+      setError(msg.length > 120 ? 'Connection issue — trying to recover…' : msg);
+    }
+  }
+
   const emitSignal = useCallback(
     (signal: SignalPayload) => {
       if (!peerId) return;
       const socket = connectSocket();
+      // Single channel for SDP/ICE — avoids duplicate setLocalDescription from dual relays
       socket.emit('call:signal', {
         toUserId: peerId,
         type: mode === 'video' ? 'VIDEO' : 'VOICE',
         callId,
         signal,
       });
-      if (signal.type === 'offer') {
-        socket.emit('offer', { toUserId: peerId, callId, sdp: signal.sdp });
-      } else if (signal.type === 'answer') {
-        socket.emit('answer', { toUserId: peerId, callId, sdp: signal.sdp });
-      } else if (signal.type === 'ice') {
-        socket.emit('iceCandidate', { toUserId: peerId, callId, candidate: signal.candidate });
-      } else if (signal.type === 'hangup') {
+      if (signal.type === 'hangup') {
         socket.emit('callEnded', { toUserId: peerId, callId, reason: signal.reason });
       } else if (signal.type === 'reject') {
         socket.emit('callRejected', { toUserId: peerId, callId });
@@ -186,19 +206,28 @@ export function CallPage({ mode }: { mode: 'voice' | 'video' }) {
     async function createAndSendOffer() {
       const pc = pcRef.current;
       if (!pc || !pcReadyRef.current) return;
-      if (makingOfferRef.current) return;
-      if (pc.signalingState !== 'stable') return;
+      if (makingOfferRef.current || offerSentRef.current) return;
+      // Only create an offer from a stable (no local/remote offer pending) state
+      if (pc.signalingState !== 'stable') {
+        console.warn('[call] skip createOffer, state=', pc.signalingState);
+        return;
+      }
       makingOfferRef.current = true;
       try {
         const offer = await pc.createOffer({
           offerToReceiveAudio: true,
           offerToReceiveVideo: mode === 'video',
         });
+        if (pc.signalingState !== 'stable') {
+          console.warn('[call] abort setLocalDescription(offer), state changed to', pc.signalingState);
+          return;
+        }
         await pc.setLocalDescription(offer);
+        offerSentRef.current = true;
         emitSignal({ type: 'offer', sdp: pc.localDescription ?? offer });
         setStatus('Ringing…');
       } catch (err) {
-        setError(err instanceof Error ? err.message : 'Failed to create offer');
+        reportSignalingIssue(err, 'createOffer/setLocalDescription');
       } finally {
         makingOfferRef.current = false;
       }
@@ -222,6 +251,7 @@ export function CallPage({ mode }: { mode: 'voice' | 'video' }) {
         peerAcceptedRef.current = true;
         setStatus('Answered — connecting…');
         if (role === 'caller' && iceConfigRef.current?.mediaMode !== 'livekit') {
+          // Only first accepted/ready should create the offer
           await createAndSendOffer();
         }
         return;
@@ -242,36 +272,103 @@ export function CallPage({ mode }: { mode: 'voice' | 'video' }) {
 
       try {
         if (signal.type === 'offer' && signal.sdp) {
+          const key = sdpKey(signal.sdp);
+          // Ignore exact duplicate offers (call:signal + named "offer" event)
+          if (key && key === lastRemoteOfferKeyRef.current) {
+            console.warn('[call] ignore duplicate offer');
+            return;
+          }
+
           const offerCollision =
             makingOfferRef.current || pc.signalingState !== 'stable';
           ignoreOfferRef.current = !isPolite && offerCollision;
-          if (ignoreOfferRef.current) return;
-
-          await pc.setRemoteDescription(signal.sdp);
-          await flushIce();
-          const answer = await pc.createAnswer();
-          await pc.setLocalDescription(answer);
-          emitSignal({ type: 'answer', sdp: pc.localDescription ?? answer });
-          setStatus('Connecting…');
-        } else if (signal.type === 'answer' && signal.sdp) {
-          if (pc.signalingState === 'have-local-offer') {
-            await pc.setRemoteDescription(signal.sdp);
-            await flushIce();
-            setStatus('Connecting…');
+          if (ignoreOfferRef.current) {
+            console.warn('[call] ignore offer (glare, impolite)', pc.signalingState);
+            return;
           }
+
+          // Already answering / already have remote offer — do not answer twice
+          if (answeringRef.current) {
+            console.warn('[call] ignore offer, already answering');
+            return;
+          }
+          if (pc.signalingState === 'have-remote-offer' || pc.signalingState === 'stable') {
+            // have-remote-offer: might be re-offer; only accept if we haven't answered this SDP
+            if (pc.signalingState === 'have-remote-offer' && pc.currentRemoteDescription) {
+              const existingKey = sdpKey(pc.currentRemoteDescription);
+              if (existingKey === key) {
+                console.warn('[call] ignore re-delivery of same remote offer');
+                return;
+              }
+            }
+          } else if (pc.signalingState === 'have-local-pranswer' || pc.signalingState === 'have-remote-pranswer') {
+            return;
+          } else if (pc.signalingState !== 'have-local-offer') {
+            // unexpected
+            console.warn('[call] skip offer in state', pc.signalingState);
+            return;
+          }
+
+          answeringRef.current = true;
+          try {
+            await pc.setRemoteDescription(signal.sdp);
+            lastRemoteOfferKeyRef.current = key;
+            await flushIce();
+
+            // Critical: only answer when we actually have a remote offer pending
+            if (pc.signalingState !== 'have-remote-offer') {
+              console.warn(
+                '[call] skip createAnswer/setLocalDescription — signalingState is',
+                pc.signalingState,
+              );
+              return;
+            }
+
+            const answer = await pc.createAnswer();
+            if (pc.signalingState !== 'have-remote-offer') {
+              console.warn(
+                '[call] skip setLocalDescription(answer) — state became',
+                pc.signalingState,
+              );
+              return;
+            }
+            await pc.setLocalDescription(answer);
+            emitSignal({ type: 'answer', sdp: pc.localDescription ?? answer });
+            setStatus('Connecting…');
+          } finally {
+            answeringRef.current = false;
+          }
+        } else if (signal.type === 'answer' && signal.sdp) {
+          const key = sdpKey(signal.sdp);
+          if (key && key === lastRemoteAnswerKeyRef.current) {
+            console.warn('[call] ignore duplicate answer');
+            return;
+          }
+          // Only apply remote answer while we have a local offer out
+          if (pc.signalingState !== 'have-local-offer') {
+            console.warn(
+              '[call] skip setRemoteDescription(answer) — signalingState is',
+              pc.signalingState,
+            );
+            return;
+          }
+          await pc.setRemoteDescription(signal.sdp);
+          lastRemoteAnswerKeyRef.current = key;
+          await flushIce();
+          setStatus('Connecting…');
         } else if (signal.type === 'ice' && signal.candidate) {
           if (pc.remoteDescription) {
             try {
               await pc.addIceCandidate(signal.candidate);
-            } catch {
-              /* ignore */
+            } catch (err) {
+              console.warn('[call] addIceCandidate ignored', err);
             }
           } else {
             pendingIce.current.push(signal.candidate);
           }
         }
       } catch (err) {
-        setError(err instanceof Error ? err.message : 'Signaling error');
+        reportSignalingIssue(err, 'processSignal');
       }
     }
 
@@ -435,15 +532,18 @@ export function CallPage({ mode }: { mode: 'voice' | 'video' }) {
           connectedRef.current = true;
           setConnected(true);
           setStatus('Connected');
+          setError(''); // clear stale signaling warnings once media works
         } else if (state === 'connecting') {
           setStatus('Connecting…');
         } else if (state === 'disconnected') {
           setStatus('Reconnecting…');
         } else if (state === 'failed') {
-          setError('Connection failed. TURN may be required on this network.');
+          console.warn('[call] connectionState=failed, restarting ICE');
           try {
             pc.restartIce();
+            setStatus('Reconnecting…');
           } catch {
+            setError('Connection failed. Check network or TURN settings.');
             void endCall('FAILED', true);
           }
         }
@@ -461,6 +561,7 @@ export function CallPage({ mode }: { mode: 'voice' | 'video' }) {
           setStatus('Connected');
           connectedRef.current = true;
           setConnected(true);
+          setError('');
         } else if (pc.iceConnectionState === 'checking') {
           setStatus('Checking network…');
         }
@@ -516,33 +617,9 @@ export function CallPage({ mode }: { mode: 'voice' | 'video' }) {
       void processSignal(payload.signal);
     }
 
-    function onOffer(payload: {
-      fromUserId: string;
-      callId?: string;
-      sdp: RTCSessionDescriptionInit;
-    }) {
-      if (payload.fromUserId !== peerId) return;
-      void processSignal({ type: 'offer', sdp: payload.sdp });
-    }
-
-    function onAnswer(payload: {
-      fromUserId: string;
-      callId?: string;
-      sdp: RTCSessionDescriptionInit;
-    }) {
-      if (payload.fromUserId !== peerId) return;
-      void processSignal({ type: 'answer', sdp: payload.sdp });
-    }
-
-    function onIce(payload: {
-      fromUserId: string;
-      callId?: string;
-      candidate: RTCIceCandidateInit;
-    }) {
-      if (payload.fromUserId !== peerId) return;
-      void processSignal({ type: 'ice', candidate: payload.candidate });
-    }
-
+    // Prefer unified call:signal only — named events also relay the same SDP and caused
+    // duplicate setLocalDescription(answer) when both fired.
+    // Keep callAccepted / callEnded as thin aliases without SDP.
     function onAccepted(payload: { fromUserId: string; callId?: string }) {
       if (payload.fromUserId !== peerId) return;
       void processSignal({ type: 'accepted', callId: payload.callId });
@@ -559,9 +636,6 @@ export function CallPage({ mode }: { mode: 'voice' | 'video' }) {
     }
 
     socket.on('call:signal', onSignal);
-    socket.on('offer', onOffer);
-    socket.on('answer', onAnswer);
-    socket.on('iceCandidate', onIce);
     socket.on('callAccepted', onAccepted);
     socket.on('callEnded', onEnded);
     socket.on('callRejected', onRejected);
@@ -614,9 +688,6 @@ export function CallPage({ mode }: { mode: 'voice' | 'video' }) {
       if (ringTimer) window.clearTimeout(ringTimer);
       window.clearInterval(statsTimer);
       socket.off('call:signal', onSignal);
-      socket.off('offer', onOffer);
-      socket.off('answer', onAnswer);
-      socket.off('iceCandidate', onIce);
       socket.off('callAccepted', onAccepted);
       socket.off('callEnded', onEnded);
       socket.off('callRejected', onRejected);

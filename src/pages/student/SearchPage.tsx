@@ -1,8 +1,15 @@
-import { Calendar, MessageCircle, Search as SearchIcon, UsersRound } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
+import {
+  Calendar,
+  Filter,
+  MessageCircle,
+  Search as SearchIcon,
+  Users,
+  UsersRound,
+  X,
+} from 'lucide-react';
+import { useEffect, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { Button } from '../../components/ui/Button';
-import { Input } from '../../components/ui/Input';
 import { StudentAvatar } from '../../components/student/StudentAvatar';
 import {
   acceptFriendByUserId,
@@ -12,44 +19,24 @@ import {
 } from '../../lib/social';
 import type { SearchResult } from '../../types/social';
 
-type Tab = 'all' | 'students' | 'communities' | 'events';
-
-const RECENT_KEY = 'avichian_recent_searches';
-
-function loadRecent(): string[] {
-  try {
-    const raw = localStorage.getItem(RECENT_KEY);
-    const arr = raw ? (JSON.parse(raw) as string[]) : [];
-    return Array.isArray(arr) ? arr.slice(0, 8) : [];
-  } catch {
-    return [];
-  }
-}
-
-function saveRecent(q: string) {
-  const next = [q, ...loadRecent().filter((x) => x !== q)].slice(0, 8);
-  localStorage.setItem(RECENT_KEY, JSON.stringify(next));
-}
+type Tab = 'students' | 'communities' | 'events';
 
 export function SearchPage() {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const [query, setQuery] = useState(searchParams.get('q') ?? '');
-  const [tab, setTab] = useState<Tab>((searchParams.get('type') as Tab) || 'all');
-  const [department, setDepartment] = useState(searchParams.get('department') ?? '');
-  const [year, setYear] = useState(searchParams.get('year') ?? '');
-  const [sort, setSort] = useState<'az' | 'recent' | 'active'>(
-    (searchParams.get('sort') as 'az' | 'recent' | 'active') || 'az',
+  const [tab, setTab] = useState<Tab>(
+    (searchParams.get('type') as Tab) === 'communities' ||
+      (searchParams.get('type') as Tab) === 'events'
+      ? (searchParams.get('type') as Tab)
+      : 'students',
   );
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  const [department, setDepartment] = useState('');
+  const [year, setYear] = useState('');
   const [students, setStudents] = useState<SearchResult[]>([]);
   const [communities, setCommunities] = useState<
-    Array<{
-      id: string;
-      name: string;
-      description: string;
-      memberCount: number;
-      coverUrl: string | null;
-    }>
+    Array<{ id: string; name: string; description: string; memberCount: number }>
   >([]);
   const [events, setEvents] = useState<
     Array<{ id: string; title: string; startsAt: string; venue: string | null }>
@@ -57,7 +44,6 @@ export function SearchPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [actionId, setActionId] = useState<string | null>(null);
-  const [recent, setRecent] = useState(loadRecent);
 
   useEffect(() => {
     setQuery(searchParams.get('q') ?? '');
@@ -70,24 +56,16 @@ export function SearchPage() {
         setError('');
         const data = await unifiedSearch({
           q: query.trim(),
-          type: tab,
+          type: tab === 'students' ? 'students' : tab,
           department: department.trim() || undefined,
           year: year ? Number(year) : undefined,
-          sort,
+          sort: 'az',
         });
         setStudents(data.students ?? []);
         setCommunities(data.communities ?? []);
         setEvents(data.events ?? []);
-        if (query.trim().length >= 2) {
-          saveRecent(query.trim());
-          setRecent(loadRecent());
-        }
-        const next: Record<string, string> = {};
+        const next: Record<string, string> = { type: tab };
         if (query.trim()) next.q = query.trim();
-        if (tab !== 'all') next.type = tab;
-        if (department.trim()) next.department = department.trim();
-        if (year) next.year = year;
-        if (sort !== 'az') next.sort = sort;
         setSearchParams(next, { replace: true });
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Search failed');
@@ -97,27 +75,21 @@ export function SearchPage() {
       } finally {
         setLoading(false);
       }
-    }, 280);
+    }, 260);
     return () => window.clearTimeout(timer);
-  }, [query, tab, department, year, sort, setSearchParams]);
-
-  const depts = useMemo(() => {
-    const s = new Set(students.map((x) => x.department).filter(Boolean));
-    return Array.from(s).sort();
-  }, [students]);
+  }, [query, tab, department, year, setSearchParams]);
 
   async function handleAddFriend(userId: string) {
     try {
       setActionId(userId);
-      setError('');
       await sendFriendRequest(userId);
       setStudents((prev) =>
-        prev.map((item) =>
-          item.id === userId ? { ...item, friendshipStatus: 'pending_outgoing' } : item,
+        prev.map((s) =>
+          s.id === userId ? { ...s, friendshipStatus: 'pending_outgoing' } : s,
         ),
       );
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Could not send request');
+      setError(err instanceof Error ? err.message : 'Request failed');
     } finally {
       setActionId(null);
     }
@@ -128,9 +100,7 @@ export function SearchPage() {
       setActionId(userId);
       await acceptFriendByUserId(userId);
       setStudents((prev) =>
-        prev.map((item) =>
-          item.id === userId ? { ...item, friendshipStatus: 'friends' } : item,
-        ),
+        prev.map((s) => (s.id === userId ? { ...s, friendshipStatus: 'friends' } : s)),
       );
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Accept failed');
@@ -145,43 +115,70 @@ export function SearchPage() {
       const chat = await openChatWithPeer(userId);
       navigate(`/home/chat/${chat.id}`);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Friends only can message');
+      setError(err instanceof Error ? err.message : 'Friends only');
     } finally {
       setActionId(null);
     }
   }
 
   const tabs: { id: Tab; label: string }[] = [
-    { id: 'all', label: 'All' },
     { id: 'students', label: 'Students' },
     { id: 'communities', label: 'Communities' },
     { id: 'events', label: 'Events' },
   ];
 
   return (
-    <div className="mx-auto w-full max-w-xl min-w-0 space-y-4">
-      <div className="relative">
-        <SearchIcon className="pointer-events-none absolute left-4 top-[2.65rem] text-slate-400" size={18} />
-        <Input
-          label="Search"
-          placeholder="Name, reg no, department, community, event…"
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          autoComplete="off"
-          className="!pl-11"
-        />
+    <div className="mx-auto w-full max-w-lg space-y-5 pb-8">
+      {/* Search bar */}
+      <div className="flex items-center gap-2">
+        <div className="relative min-w-0 flex-1">
+          <SearchIcon
+            className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-slate-400"
+            size={18}
+          />
+          <input
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Search people, communities, events…"
+            autoComplete="off"
+            className="min-h-12 w-full rounded-full border-0 bg-slate-100/90 py-3 pl-11 pr-10 text-sm outline-none ring-1 ring-slate-200/80 focus:bg-white focus:ring-2 focus:ring-primary/30 dark:bg-slate-800/80 dark:ring-slate-700 dark:focus:bg-slate-900"
+          />
+          {query ? (
+            <button
+              type="button"
+              className="absolute right-3 top-1/2 -translate-y-1/2 rounded-full p-1 text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-700"
+              onClick={() => setQuery('')}
+              aria-label="Clear"
+            >
+              <X size={16} />
+            </button>
+          ) : null}
+        </div>
+        <button
+          type="button"
+          onClick={() => setFiltersOpen((v) => !v)}
+          className={`flex h-12 w-12 shrink-0 items-center justify-center rounded-full ring-1 transition ${
+            filtersOpen || department || year
+              ? 'bg-primary text-white ring-primary'
+              : 'bg-slate-100 text-slate-600 ring-slate-200 dark:bg-slate-800 dark:text-slate-300 dark:ring-slate-700'
+          }`}
+          aria-label="Filters"
+        >
+          <Filter size={18} />
+        </button>
       </div>
 
-      <div className="flex flex-wrap gap-2">
+      {/* Tabs */}
+      <div className="flex gap-1 rounded-full bg-slate-100/90 p-1 dark:bg-slate-800/80">
         {tabs.map((t) => (
           <button
             key={t.id}
             type="button"
             onClick={() => setTab(t.id)}
-            className={`rounded-full px-3 py-1.5 text-xs font-semibold transition ${
+            className={`min-h-10 flex-1 rounded-full text-xs font-semibold transition sm:text-sm ${
               tab === t.id
-                ? 'bg-primary text-white shadow-float'
-                : 'bg-slate-100 text-slate-600 hover:bg-primary/10 dark:bg-slate-800 dark:text-slate-300'
+                ? 'bg-white text-slate-900 shadow-soft dark:bg-slate-900 dark:text-white'
+                : 'text-slate-500 hover:text-slate-800 dark:hover:text-slate-200'
             }`}
           >
             {t.label}
@@ -189,196 +186,174 @@ export function SearchPage() {
         ))}
       </div>
 
-      <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
-        <label className="text-xs text-slate-500">
-          Department
-          <input
-            value={department}
-            onChange={(e) => setDepartment(e.target.value)}
-            list="dept-list"
-            placeholder="Any"
-            className="mt-1 min-h-10 w-full rounded-2xl border border-slate-200 bg-white px-3 text-sm dark:border-slate-700 dark:bg-slate-900"
-          />
-          <datalist id="dept-list">
-            {depts.map((d) => (
-              <option key={d} value={d} />
-            ))}
-          </datalist>
-        </label>
-        <label className="text-xs text-slate-500">
-          Year
-          <select
-            value={year}
-            onChange={(e) => setYear(e.target.value)}
-            className="mt-1 min-h-10 w-full rounded-2xl border border-slate-200 bg-white px-3 text-sm dark:border-slate-700 dark:bg-slate-900"
-          >
-            <option value="">Any</option>
-            {[1, 2, 3, 4].map((y) => (
-              <option key={y} value={y}>
-                Year {y}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="text-xs text-slate-500">
-          Sort
-          <select
-            value={sort}
-            onChange={(e) => setSort(e.target.value as 'az' | 'recent' | 'active')}
-            className="mt-1 min-h-10 w-full rounded-2xl border border-slate-200 bg-white px-3 text-sm dark:border-slate-700 dark:bg-slate-900"
-          >
-            <option value="az">A–Z</option>
-            <option value="recent">Recently joined</option>
-            <option value="active">Most active</option>
-          </select>
-        </label>
-      </div>
-
-      {!query.trim() && recent.length ? (
-        <div className="space-y-2">
-          <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">Recent</p>
-          <div className="flex flex-wrap gap-2">
-            {recent.map((r) => (
-              <button
-                key={r}
-                type="button"
-                onClick={() => setQuery(r)}
-                className="rounded-full bg-slate-100 px-3 py-1.5 text-xs font-medium text-slate-600 dark:bg-slate-800 dark:text-slate-300"
-              >
-                {r}
-              </button>
-            ))}
-          </div>
+      {filtersOpen ? (
+        <div className="grid grid-cols-2 gap-3 rounded-[24px] bg-white/80 p-4 shadow-soft dark:bg-slate-900/60">
+          <label className="text-xs font-medium text-slate-500">
+            Department
+            <input
+              value={department}
+              onChange={(e) => setDepartment(e.target.value)}
+              placeholder="Any"
+              className="mt-1.5 min-h-11 w-full rounded-2xl border border-slate-200 bg-white px-3 text-sm dark:border-slate-700 dark:bg-slate-800"
+            />
+          </label>
+          <label className="text-xs font-medium text-slate-500">
+            Year
+            <select
+              value={year}
+              onChange={(e) => setYear(e.target.value)}
+              className="mt-1.5 min-h-11 w-full rounded-2xl border border-slate-200 bg-white px-3 text-sm dark:border-slate-700 dark:bg-slate-800"
+            >
+              <option value="">Any</option>
+              {[1, 2, 3, 4].map((y) => (
+                <option key={y} value={y}>
+                  Year {y}
+                </option>
+              ))}
+            </select>
+          </label>
         </div>
       ) : null}
 
-      {error ? <p className="break-anywhere text-sm text-error">{error}</p> : null}
-      {loading ? <p className="text-sm text-slate-500">Searching…</p> : null}
+      {error ? <p className="text-sm text-error">{error}</p> : null}
 
-      {(tab === 'all' || tab === 'students') && students.length > 0 ? (
-        <section className="space-y-3">
-          <h2 className="text-sm font-semibold text-slate-700 dark:text-slate-200">Students</h2>
-          {students.map((student) => {
-            const isPending = student.friendshipStatus === 'pending_outgoing';
-            const isFriend = student.friendshipStatus === 'friends';
-            const isIncoming = student.friendshipStatus === 'pending_incoming';
-            return (
+      {loading ? (
+        <div className="space-y-3">
+          {[1, 2, 3, 4].map((i) => (
+            <div
+              key={i}
+              className="flex animate-pulse items-center gap-3 rounded-[24px] bg-slate-100/80 p-4 dark:bg-slate-800/50"
+            >
+              <div className="h-14 w-14 rounded-full bg-slate-200 dark:bg-slate-700" />
+              <div className="min-w-0 flex-1 space-y-2">
+                <div className="h-3.5 w-1/2 rounded-full bg-slate-200 dark:bg-slate-700" />
+                <div className="h-3 w-2/3 rounded-full bg-slate-200/80 dark:bg-slate-700/80" />
+              </div>
+              <div className="h-9 w-20 rounded-full bg-slate-200 dark:bg-slate-700" />
+            </div>
+          ))}
+        </div>
+      ) : null}
+
+      {!loading && tab === 'students' ? (
+        <div className="space-y-2.5">
+          {students.length === 0 ? (
+            <p className="py-12 text-center text-sm text-slate-400">
+              {query.trim() ? `No students match “${query.trim()}”` : 'Start typing a name or reg no'}
+            </p>
+          ) : (
+            students.map((s) => (
               <div
-                key={student.id}
-                className="glass-card flex min-w-0 items-center gap-3 rounded-[24px] p-3 shadow-soft sm:p-4"
+                key={s.id}
+                className="flex items-center gap-3 rounded-[24px] bg-white/90 p-3.5 shadow-soft ring-1 ring-slate-100/80 dark:bg-slate-900/70 dark:ring-slate-800"
               >
-                <Link to={`/home/user/${student.id}`} className="shrink-0">
-                  <StudentAvatar name={student.name} photoUrl={student.profilePhotoUrl} />
+                <Link to={`/home/user/${s.id}`} className="shrink-0">
+                  <StudentAvatar name={s.name} photoUrl={s.profilePhotoUrl} size="md" />
                 </Link>
                 <div className="min-w-0 flex-1">
                   <Link
-                    to={`/home/user/${student.id}`}
-                    className="font-semibold text-slate-900 hover:text-primary break-anywhere dark:text-white"
+                    to={`/home/user/${s.id}`}
+                    className="block truncate font-semibold text-slate-900 dark:text-white"
                   >
-                    {student.name}
+                    {s.name}
                   </Link>
-                  <p className="text-xs text-slate-500 break-anywhere">
-                    {student.regNo} · {student.department}
-                    {student.year ? ` · Y${student.year}` : ''}
-                    {student.online ? ' · Online' : ''}
-                    {(student.mutualFriends ?? 0) > 0
-                      ? ` · ${student.mutualFriends} mutual`
-                      : ''}
+                  <p className="truncate text-xs text-slate-500">
+                    {s.department}
+                    {s.year ? ` · Year ${s.year}` : ''}
+                    {(s.mutualFriends ?? 0) > 0 ? ` · ${s.mutualFriends} mutual` : ''}
                   </p>
                 </div>
-                <div className="flex shrink-0 flex-col items-end gap-1 sm:flex-row sm:items-center">
-                  {isFriend ? (
-                    <>
-                      <span className="text-xs font-medium text-success">Friends</span>
-                      <Button
-                        variant="secondary"
-                        className="w-auto !min-h-9 px-3 py-1.5 text-xs"
-                        loading={actionId === student.id}
-                        onClick={() => void handleMessage(student.id)}
-                      >
-                        <MessageCircle size={14} className="mr-1" /> Message
-                      </Button>
-                    </>
-                  ) : isPending ? (
-                    <span className="text-xs font-medium text-slate-400">Requested</span>
-                  ) : isIncoming ? (
+                <div className="shrink-0">
+                  {s.friendshipStatus === 'friends' ? (
                     <Button
-                      className="w-auto !min-h-9 px-3 py-1.5 text-xs"
-                      loading={actionId === student.id}
-                      onClick={() => void handleAccept(student.id)}
+                      variant="secondary"
+                      className="!min-h-10 w-auto rounded-full px-3.5 text-xs"
+                      loading={actionId === s.id}
+                      onClick={() => void handleMessage(s.id)}
+                    >
+                      <MessageCircle size={14} className="mr-1" /> Message
+                    </Button>
+                  ) : s.friendshipStatus === 'pending_outgoing' ? (
+                    <span className="rounded-full bg-slate-100 px-3 py-2 text-xs font-medium text-slate-500 dark:bg-slate-800">
+                      Requested
+                    </span>
+                  ) : s.friendshipStatus === 'pending_incoming' ? (
+                    <Button
+                      className="!min-h-10 w-auto rounded-full px-3.5 text-xs"
+                      loading={actionId === s.id}
+                      onClick={() => void handleAccept(s.id)}
                     >
                       Accept
                     </Button>
                   ) : (
                     <Button
                       variant="secondary"
-                      className="w-auto !min-h-9 px-3 py-1.5 text-xs"
-                      loading={actionId === student.id}
-                      onClick={() => void handleAddFriend(student.id)}
+                      className="!min-h-10 w-auto rounded-full px-3.5 text-xs"
+                      loading={actionId === s.id}
+                      onClick={() => void handleAddFriend(s.id)}
                     >
-                      Add friend
+                      <Users size={14} className="mr-1" /> Add
                     </Button>
                   )}
                 </div>
               </div>
-            );
-          })}
-        </section>
+            ))
+          )}
+        </div>
       ) : null}
 
-      {(tab === 'all' || tab === 'communities') && communities.length > 0 ? (
-        <section className="space-y-3">
-          <h2 className="text-sm font-semibold text-slate-700 dark:text-slate-200">Communities</h2>
-          {communities.map((c) => (
-            <Link
-              key={c.id}
-              to={`/home/communities/${c.id}`}
-              className="glass-card flex items-center gap-3 rounded-[24px] p-4 shadow-soft"
-            >
-              <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-primary/10 text-primary">
-                <UsersRound size={20} />
-              </div>
-              <div className="min-w-0 flex-1">
-                <p className="font-semibold text-slate-900 dark:text-white">{c.name}</p>
-                <p className="truncate text-xs text-slate-500">
-                  {c.memberCount} members · {c.description || 'Community'}
-                </p>
-              </div>
-            </Link>
-          ))}
-        </section>
+      {!loading && tab === 'communities' ? (
+        <div className="space-y-2.5">
+          {communities.length === 0 ? (
+            <p className="py-12 text-center text-sm text-slate-400">No communities found</p>
+          ) : (
+            communities.map((c) => (
+              <Link
+                key={c.id}
+                to={`/home/communities/${c.id}`}
+                className="flex items-center gap-3 rounded-[24px] bg-white/90 p-3.5 shadow-soft ring-1 ring-slate-100 dark:bg-slate-900/70 dark:ring-slate-800"
+              >
+                <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-primary/10 text-primary">
+                  <UsersRound size={20} />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <p className="font-semibold text-slate-900 dark:text-white">{c.name}</p>
+                  <p className="truncate text-xs text-slate-500">
+                    {c.memberCount} members
+                    {c.description ? ` · ${c.description}` : ''}
+                  </p>
+                </div>
+              </Link>
+            ))
+          )}
+        </div>
       ) : null}
 
-      {(tab === 'all' || tab === 'events') && events.length > 0 ? (
-        <section className="space-y-3">
-          <h2 className="text-sm font-semibold text-slate-700 dark:text-slate-200">Events</h2>
-          {events.map((e) => (
-            <Link
-              key={e.id}
-              to="/home/events"
-              className="glass-card flex items-center gap-3 rounded-[24px] p-4 shadow-soft"
-            >
-              <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-amber-500/10 text-amber-600">
-                <Calendar size={20} />
-              </div>
-              <div className="min-w-0 flex-1">
-                <p className="font-semibold text-slate-900 dark:text-white">{e.title}</p>
-                <p className="truncate text-xs text-slate-500">
-                  {new Date(e.startsAt).toLocaleString()}
-                  {e.venue ? ` · ${e.venue}` : ''}
-                </p>
-              </div>
-            </Link>
-          ))}
-        </section>
-      ) : null}
-
-      {!loading &&
-      query.trim() &&
-      !students.length &&
-      !communities.length &&
-      !events.length ? (
-        <p className="text-sm text-slate-500">No results for “{query.trim()}”.</p>
+      {!loading && tab === 'events' ? (
+        <div className="space-y-2.5">
+          {events.length === 0 ? (
+            <p className="py-12 text-center text-sm text-slate-400">No events found</p>
+          ) : (
+            events.map((e) => (
+              <Link
+                key={e.id}
+                to="/home/events"
+                className="flex items-center gap-3 rounded-[24px] bg-white/90 p-3.5 shadow-soft ring-1 ring-slate-100 dark:bg-slate-900/70 dark:ring-slate-800"
+              >
+                <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-amber-500/10 text-amber-600">
+                  <Calendar size={20} />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <p className="font-semibold text-slate-900 dark:text-white">{e.title}</p>
+                  <p className="truncate text-xs text-slate-500">
+                    {new Date(e.startsAt).toLocaleString()}
+                    {e.venue ? ` · ${e.venue}` : ''}
+                  </p>
+                </div>
+              </Link>
+            ))
+          )}
+        </div>
       ) : null}
     </div>
   );

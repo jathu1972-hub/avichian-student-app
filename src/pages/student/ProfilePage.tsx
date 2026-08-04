@@ -247,8 +247,9 @@ export function ProfilePage() {
       { label: 'Reels', value: reels.length, onClick: () => setTab('reels') },
       { label: 'Stories', value: stories.length, onClick: () => setTab('stories') },
       { label: 'Friends', value: friends.length, onClick: () => setTab('friends') },
+      { label: 'Groups', value: communities.length, onClick: () => setTab('communities') },
     ],
-    [posts.length, reels.length, stories.length, friends.length],
+    [posts.length, reels.length, stories.length, friends.length, communities.length],
   );
 
   if (!user) return null;
@@ -316,10 +317,10 @@ export function ProfilePage() {
         </div>
       </div>
 
-      {/* Hero card */}
-      <div className="glass-card relative overflow-hidden rounded-[28px] shadow-float dark:bg-slate-900/50">
+      {/* Hero card — premium social header */}
+      <div className="relative overflow-hidden rounded-[28px] bg-white/90 shadow-float ring-1 ring-slate-100/80 dark:bg-slate-900/70 dark:ring-slate-800">
         {/* Cover */}
-        <div className="group relative h-36 bg-gradient-to-br from-primary via-indigo-500 to-violet-600 sm:h-44 md:h-52">
+        <div className="group relative h-40 bg-gradient-to-br from-primary via-indigo-500 to-violet-600 sm:h-48 md:h-56">
           {coverUrl ? (
             <button
               type="button"
@@ -329,9 +330,10 @@ export function ProfilePage() {
               <img src={coverUrl} alt="" className="h-full w-full object-cover" />
             </button>
           ) : (
-            <div className="absolute inset-0 bg-[radial-gradient(circle_at_30%_20%,rgba(255,255,255,0.25),transparent_50%)]" />
+            <div className="absolute inset-0 bg-[radial-gradient(circle_at_30%_20%,rgba(255,255,255,0.28),transparent_55%)]" />
           )}
-          <label className="absolute bottom-3 right-3 flex cursor-pointer items-center gap-1.5 rounded-full bg-black/45 px-3 py-1.5 text-[11px] font-semibold text-white backdrop-blur transition hover:bg-black/60">
+          <div className="pointer-events-none absolute inset-0 bg-gradient-to-t from-black/25 to-transparent" />
+          <label className="absolute bottom-3 right-3 z-10 flex cursor-pointer items-center gap-1.5 rounded-full bg-black/50 px-3 py-1.5 text-[11px] font-semibold text-white backdrop-blur transition hover:bg-black/65">
             <Camera size={12} /> Cover
             <input
               type="file"
@@ -345,7 +347,7 @@ export function ProfilePage() {
         <div className="px-4 pb-5 pt-0 sm:px-6">
           <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
             <div className="flex items-end gap-3">
-              <div className="relative -mt-12 sm:-mt-14">
+              <div className="relative -mt-14 sm:-mt-16">
                 <button
                   type="button"
                   onClick={() =>
@@ -353,12 +355,12 @@ export function ProfilePage() {
                       ? setLightbox({ src: photoUrl, label: 'Profile photo' })
                       : undefined
                   }
-                  className="block rounded-full ring-4 ring-white shadow-float dark:ring-slate-900"
+                  className="block rounded-full bg-white p-1 shadow-float ring-2 ring-white dark:bg-slate-900 dark:ring-slate-900"
                 >
                   <StudentAvatar name={user.name} photoUrl={user.profilePhotoUrl} size="lg" ring />
                 </button>
-                <label className="absolute bottom-0 right-0 flex h-8 w-8 cursor-pointer items-center justify-center rounded-full bg-primary text-white shadow-soft">
-                  <Camera size={14} />
+                <label className="absolute bottom-1 right-1 flex h-9 w-9 cursor-pointer items-center justify-center rounded-full bg-primary text-white shadow-float ring-2 ring-white dark:ring-slate-900">
+                  <Camera size={15} />
                   <input
                     type="file"
                     accept="image/jpeg,image/png,image/webp"
@@ -369,21 +371,22 @@ export function ProfilePage() {
               </div>
               <div className="min-w-0 pb-1">
                 <div className="flex flex-wrap items-center gap-1.5">
-                  <h2 className="font-display text-xl font-bold text-slate-900 dark:text-white sm:text-2xl">
+                  <h2 className="font-display text-xl font-bold tracking-tight text-slate-900 dark:text-white sm:text-2xl">
                     {user.name}
                   </h2>
                   {(user as { verifiedBadge?: boolean }).verifiedBadge ? (
                     <BadgeCheck size={18} className="text-primary" />
                   ) : null}
                 </div>
-                <p className="text-sm text-slate-500">
-                  {user.regNo} · {user.department}
+                <p className="text-sm font-medium text-slate-500">
+                  {user.department}
                   {user.year ? ` · Year ${user.year}` : ''}
                 </p>
-                <p className="mt-1 flex items-center gap-1.5 text-xs">
+                <p className="mt-0.5 font-mono text-xs text-slate-400">{user.regNo}</p>
+                <p className="mt-1.5 flex items-center gap-1.5 text-xs">
                   {user.online ? (
                     <>
-                      <span className="h-1.5 w-1.5 rounded-full bg-success" />
+                      <span className="h-2 w-2 rounded-full bg-success shadow-[0_0_0_3px_rgba(34,197,94,0.25)]" />
                       <span className="font-medium text-success">Online</span>
                     </>
                   ) : (
@@ -426,18 +429,18 @@ export function ProfilePage() {
           {error ? <p className="mt-2 text-sm text-error">{error}</p> : null}
 
           {/* Stats */}
-          <div className="mt-4 grid grid-cols-4 gap-2">
+          <div className="mt-5 grid grid-cols-5 gap-1.5 sm:gap-2">
             {stats.map((s) => (
               <button
                 key={s.label}
                 type="button"
                 onClick={s.onClick}
-                className="rounded-2xl bg-white/70 px-2 py-3 text-center shadow-soft backdrop-blur transition hover:bg-white dark:bg-slate-800/70"
+                className="rounded-2xl bg-slate-50/90 px-1 py-3 text-center transition hover:bg-primary/5 dark:bg-slate-800/80"
               >
-                <p className="font-display text-lg font-bold text-slate-900 dark:text-white">
+                <p className="font-display text-base font-bold text-slate-900 dark:text-white sm:text-lg">
                   <AnimatedCount value={s.value} />
                 </p>
-                <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">
+                <p className="text-[9px] font-semibold uppercase tracking-wide text-slate-400 sm:text-[10px]">
                   {s.label}
                 </p>
               </button>
