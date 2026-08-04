@@ -1,10 +1,10 @@
 /**
  * Frontend API / Socket configuration.
  *
- * Development: empty VITE_API_URL → relative `/api` via Vite proxy to localhost:4000.
- * Production (Netlify): MUST set VITE_API_URL to the backend origin, e.g.
- *   VITE_API_URL=https://api.avichian.com
- * (no trailing slash; optional trailing /api is stripped).
+ * Resolution order for API origin:
+ * 1. Runtime public/config.json → { "apiUrl": "https://your-api" }
+ * 2. Build-time VITE_API_URL
+ * 3. Dev only: relative /api (Vite proxy)
  *
  * Never put secrets in VITE_* variables.
  */
@@ -13,76 +13,102 @@ function stripTrailingSlash(url: string): string {
   return url.replace(/\/+$/, '');
 }
 
-/**
- * Normalize VITE_API_URL to API origin only (scheme + host[:port]).
- * Accepts: https://api.example.com  OR  https://api.example.com/api
- */
 export function normalizeApiOrigin(raw: string): string {
   let url = stripTrailingSlash(raw.trim());
-  // Users often paste full REST base with /api
   if (url.toLowerCase().endsWith('/api')) {
-    url = url.slice(0, -4);
-    url = stripTrailingSlash(url);
+    url = stripTrailingSlash(url.slice(0, -4));
   }
   return url;
 }
 
-/** Origin of the API, e.g. https://api.avichian.in — empty in local dev. */
-export function getApiOrigin(): string {
-  const raw = import.meta.env.VITE_API_URL as string | undefined;
-  if (!raw || !raw.trim()) {
-    if (import.meta.env.PROD) {
-      console.error(
-        '[AVICHIAN] VITE_API_URL is not set in this production build. ' +
-          'Relative /api calls hit Netlify and return index.html (JSON parse fails). ' +
-          'Set VITE_API_URL=https://your-backend-host in Netlify → Environment variables, then Redeploy.',
-      );
+/** Set from public/config.json before first API call */
+let runtimeApiOrigin = '';
+let configLoaded = false;
+
+/**
+ * Load optional runtime config (cache-busted). Safe to call multiple times.
+ * Place file at: public/config.json → { "apiUrl": "https://api.example.com" }
+ */
+export async function loadRuntimeConfig(): Promise<void> {
+  if (configLoaded) return;
+  configLoaded = true;
+  try {
+    const base = import.meta.env.BASE_URL || '/';
+    const url = `${base}config.json?v=${Date.now()}`;
+    const res = await fetch(url, { cache: 'no-store' });
+    if (!res.ok) return;
+    const json = (await res.json()) as { apiUrl?: string; VITE_API_URL?: string };
+    const raw = json.apiUrl || json.VITE_API_URL;
+    if (raw && raw.trim()) {
+      runtimeApiOrigin = normalizeApiOrigin(raw);
+      console.info('[AVICHIAN] API origin from config.json:', runtimeApiOrigin);
     }
-    return '';
+  } catch {
+    // optional file
   }
-  const origin = normalizeApiOrigin(raw);
-  if (import.meta.env.PROD && /localhost|127\.0\.0\.1/.test(origin)) {
+}
+
+function isHostedStaticFrontend(): boolean {
+  if (typeof window === 'undefined') return Boolean(import.meta.env.PROD);
+  const h = window.location.hostname;
+  return (
+    h.includes('github.io') ||
+    h.includes('netlify.app') ||
+    h.includes('vercel.app') ||
+    h.includes('pages.dev')
+  );
+}
+
+/** Origin of the API, e.g. https://api.example.com — empty only in local Vite dev. */
+export function getApiOrigin(): string {
+  if (runtimeApiOrigin) return runtimeApiOrigin;
+
+  const raw = import.meta.env.VITE_API_URL as string | undefined;
+  if (raw && raw.trim()) {
+    const origin = normalizeApiOrigin(raw);
+    if (import.meta.env.PROD && /localhost|127\.0\.0\.1/.test(origin) && isHostedStaticFrontend()) {
+      console.error('[AVICHIAN] VITE_API_URL points at localhost on a public site — browsers cannot reach it.');
+    }
+    return origin;
+  }
+
+  if (import.meta.env.PROD || isHostedStaticFrontend()) {
     console.error(
-      '[AVICHIAN] VITE_API_URL points at localhost in a production build:',
-      origin,
-      '— browsers cannot reach your laptop. Use a public API host.',
+      '[AVICHIAN] No API URL configured. Set public/config.json { "apiUrl": "https://YOUR-API" } ' +
+        'or build with VITE_API_URL, then redeploy.',
     );
   }
-  return origin;
+  return '';
 }
 
 /**
  * Base path for REST calls.
- * Local: `/api`
- * Prod: `https://api.avichian.com/api`
+ * Local: `/api`  ·  Prod: `https://your-api/api`
  */
 export function getApiBase(): string {
   const origin = getApiOrigin();
   if (origin) return `${origin}/api`;
-  // Production build without VITE_API_URL must not call relative /api (returns HTML from the SPA host).
-  if (import.meta.env.PROD) {
+
+  if (import.meta.env.PROD || isHostedStaticFrontend()) {
     throw new Error(
-      'VITE_API_URL is not configured in this production build. ' +
-        'Set the GitHub Actions variable (or Netlify env) VITE_API_URL to your Express backend origin ' +
-        '(e.g. https://avichian-api.onrender.com), then redeploy. ' +
-        'Relative /api only works in local Vite dev.',
+      'API URL is not configured (would call relative /api and get HTML 404). ' +
+        'Set config.json apiUrl or VITE_API_URL to your Express backend origin ' +
+        '(Render / Railway / Cloudflare tunnel), then redeploy. ' +
+        'Local full stack: use http://localhost:5173 with backend on :4000.',
     );
   }
   return '/api';
 }
 
-/** True when the SPA is calling the API on another origin (Netlify → Railway/Render). */
 export function isCrossOriginApi(): boolean {
   return Boolean(getApiOrigin());
 }
 
-/** Socket.IO connection URL (origin only; path is /socket.io). */
 export function getSocketUrl(): string | undefined {
   const origin = getApiOrigin();
   return origin || undefined;
 }
 
-/** Resolve relative `/api/media/...` URLs against the API origin for Netlify hosting. */
 export function resolveMediaUrl(url: string | null | undefined): string | null {
   if (!url) return null;
   if (
