@@ -69,8 +69,9 @@ export function UserProfilePage() {
       setActionLoading(true);
       const call = await startCall(profile.id, type);
       const name = encodeURIComponent(call.peer?.name || profile.name || '');
+      const room = encodeURIComponent(call.roomName || '');
       navigate(
-        `/home/call/${type === 'VOICE' ? 'voice' : 'video'}/${profile.id}?callId=${call.id}&role=caller&name=${name}`,
+        `/home/call/${type === 'VOICE' ? 'voice' : 'video'}/${profile.id}?callId=${call.id}&role=caller&name=${name}&room=${room}`,
       );
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Friends only can call');

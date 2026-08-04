@@ -132,8 +132,9 @@ export function ChatPage() {
     try {
       const call = await startCall(peerId, type);
       const n = encodeURIComponent(name || call.peer?.name || '');
+      const room = encodeURIComponent(call.roomName || '');
       navigate(
-        `/home/call/${type === 'VOICE' ? 'voice' : 'video'}/${peerId}?callId=${call.id}&role=caller&name=${n}`,
+        `/home/call/${type === 'VOICE' ? 'voice' : 'video'}/${peerId}?callId=${call.id}&role=caller&name=${n}&room=${room}`,
       );
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Call failed — friends only');

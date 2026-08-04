@@ -916,35 +916,13 @@ export async function markChatRead(conversationId: string) {
   return res.data!;
 }
 
-export async function startCall(receiverId: string, type: 'VOICE' | 'VIDEO') {
-  const res = await api<{
-    id: string;
-    type: string;
-    status: string;
-    roomName: string | null;
-    peer?: { id: string; name: string; profilePhotoUrl: string | null };
-  }>('/calls/start', {
-    method: 'POST',
-    body: JSON.stringify({ receiverId, type }),
-  });
-  return res.data!;
-}
-
-export async function updateCallStatus(
-  callId: string,
-  status: 'MISSED' | 'REJECTED' | 'COMPLETED' | 'FAILED',
-  duration = 0,
-) {
-  await api(`/calls/${callId}/status`, {
-    method: 'POST',
-    body: JSON.stringify({ status, duration }),
-  });
-}
-
-export async function fetchCallHistory() {
-  const res = await api('/calls/history');
-  return res.data!;
-}
+export {
+  startCall,
+  updateCallStatus,
+  fetchCallHistory,
+  fetchCallIceConfig,
+  fetchLiveKitToken,
+} from './calls';
 
 export async function fetchNotifications() {
   const res = await api<{
@@ -955,6 +933,13 @@ export async function fetchNotifications() {
       body: string;
       createdAt: string;
       readAt: string | null;
+      isRead?: boolean;
+      data?: {
+        requestId?: string;
+        userId?: string;
+        senderName?: string;
+        callId?: string;
+      } | null;
     }>;
     unread: number;
   }>('/notifications');
@@ -964,8 +949,48 @@ export async function fetchNotifications() {
 export async function markNotificationsRead(ids?: string[]) {
   await api('/notifications/read', {
     method: 'POST',
-    body: JSON.stringify({ ids }),
+    body: JSON.stringify(ids?.length ? { ids } : {}),
   });
+}
+
+export async function deleteNotification(id: string) {
+  await api(`/notifications/${id}`, { method: 'DELETE' });
+}
+
+export async function unifiedSearch(params: {
+  q?: string;
+  type?: 'all' | 'students' | 'communities' | 'events';
+  department?: string;
+  year?: number;
+  sort?: 'az' | 'recent' | 'active';
+}) {
+  const q = new URLSearchParams();
+  if (params.q) q.set('q', params.q);
+  if (params.type) q.set('type', params.type);
+  if (params.department) q.set('department', params.department);
+  if (params.year) q.set('year', String(params.year));
+  if (params.sort) q.set('sort', params.sort);
+  const res = await api<{
+    students: SearchResult[];
+    communities: Array<{
+      kind: 'community';
+      id: string;
+      name: string;
+      slug: string;
+      description: string;
+      coverUrl: string | null;
+      memberCount: number;
+    }>;
+    events: Array<{
+      kind: 'event';
+      id: string;
+      title: string;
+      startsAt: string;
+      venue: string | null;
+      coverUrl: string | null;
+    }>;
+  }>(`/search?${q.toString()}`);
+  return res.data!;
 }
 
 export async function fetchFriends() {
@@ -990,6 +1015,13 @@ export async function sendFriendRequest(receiverId: string) {
 
 export async function acceptFriendRequest(requestId: string) {
   await api(`/friends/requests/${requestId}/accept`, { method: 'POST' });
+}
+
+export async function acceptFriendByUserId(userId: string) {
+  await api('/friends/accept', {
+    method: 'POST',
+    body: JSON.stringify({ userId }),
+  });
 }
 
 export async function rejectFriendRequest(requestId: string) {

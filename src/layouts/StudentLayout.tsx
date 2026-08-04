@@ -20,6 +20,8 @@ import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { useBodyScrollLock } from '../hooks/useBodyScrollLock';
 import { isStaffRole } from '../lib/portal';
+import { fetchNotifications } from '../lib/social';
+import { connectSocket } from '../lib/socket';
 import { StudentAvatar } from '../components/student/StudentAvatar';
 import { IncomingCallBanner } from '../components/student/IncomingCallBanner';
 
@@ -100,11 +102,37 @@ export function StudentLayout() {
   const location = useLocation();
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
+  const [notifUnread, setNotifUnread] = useState(0);
 
   useEffect(() => {
     setDrawerOpen(false);
     setSearchOpen(false);
   }, [location.pathname]);
+
+  useEffect(() => {
+    fetchNotifications()
+      .then((d) => setNotifUnread(d.unread ?? 0))
+      .catch(() => undefined);
+    const socket = connectSocket();
+    function onNew() {
+      setNotifUnread((u) => u + 1);
+    }
+    function onRead() {
+      fetchNotifications()
+        .then((d) => setNotifUnread(d.unread ?? 0))
+        .catch(() => undefined);
+    }
+    socket.on('notification', onNew);
+    socket.on('notification:new', onNew);
+    socket.on('notification:read', onRead);
+    socket.on('friend:request', onNew);
+    return () => {
+      socket.off('notification', onNew);
+      socket.off('notification:new', onNew);
+      socket.off('notification:read', onRead);
+      socket.off('friend:request', onNew);
+    };
+  }, []);
 
   // Lock page scroll only while mobile drawer is open; always restore after
   useBodyScrollLock(drawerOpen);
@@ -281,10 +309,15 @@ export function StudentLayout() {
               ) : null}
               <NavLink
                 to="/home/notifications"
-                className="touch-target flex items-center justify-center rounded-full text-slate-500 hover:bg-primary/10 hover:text-primary dark:text-slate-300"
+                className="touch-target relative flex items-center justify-center rounded-full text-slate-500 hover:bg-primary/10 hover:text-primary dark:text-slate-300"
                 aria-label="Notifications"
               >
                 <Bell size={20} />
+                {notifUnread > 0 ? (
+                  <span className="absolute right-0.5 top-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-error px-1 text-[10px] font-bold text-white">
+                    {notifUnread > 9 ? '9+' : notifUnread}
+                  </span>
+                ) : null}
               </NavLink>
               <NavLink
                 to="/home/profile"

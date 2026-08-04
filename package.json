@@ -1,20 +1,13 @@
 {
-  "name": "avichian-student-app",
+  "name": "@avichian/student-app",
   "version": "0.1.0",
   "private": true,
-  "description": "AVICHIAN Student App — private campus platform for Avichi Arts and Science College",
   "type": "module",
-  "workspaces": [
-    "shared"
-  ],
   "scripts": {
-    "predev": "npm run build -w @avichian/shared",
     "dev": "vite --port 5173",
-    "prebuild": "npm run build -w @avichian/shared",
     "build": "vite build",
-    "build:check": "npm run build -w @avichian/shared && tsc --noEmit && vite build",
+    "build:check": "tsc --noEmit && vite build",
     "lint": "tsc --noEmit",
-    "typecheck": "tsc --noEmit",
     "preview": "vite preview --port 5173",
     "cap:sync": "npx cap sync",
     "cap:android": "npx cap open android",
@@ -24,6 +17,7 @@
     "@avichian/shared": "*",
     "appwrite": "^26.1.0",
     "framer-motion": "^12.16.0",
+    "livekit-client": "^2.21.0",
     "lucide-react": "^0.511.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
@@ -38,8 +32,5 @@
     "tailwindcss": "^4.1.8",
     "typescript": "^5.8.3",
     "vite": "^6.3.5"
-  },
-  "engines": {
-    "node": ">=20.0.0"
   }
 }

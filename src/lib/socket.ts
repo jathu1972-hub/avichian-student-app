@@ -16,7 +16,8 @@ export function getSocket(): Socket | null {
  */
 export function connectSocket(): Socket {
   const token = getAccessToken();
-  const url = getSocketUrl(); // undefined in local dev → current host (Vite proxy)
+  // Prefer explicit API origin (production / tunnel). Dev: same origin → Vite proxy.
+  const url = getSocketUrl();
 
   if (socket && lastToken === token && socket.connected) {
     return socket;
@@ -39,20 +40,39 @@ export function connectSocket(): Socket {
   socket = io(url ?? window.location.origin, {
     path: '/socket.io',
     auth: { token },
+    // Prefer websocket; fall back to polling through proxies/tunnels
     transports: ['websocket', 'polling'],
     autoConnect: true,
     withCredentials: true,
     reconnection: true,
-    reconnectionAttempts: 20,
-    reconnectionDelay: 800,
+    reconnectionAttempts: 30,
+    reconnectionDelay: 500,
     reconnectionDelayMax: 5000,
+    timeout: 20000,
   });
 
   socket.on('connect_error', (err) => {
-    console.warn('[socket] connect_error', err.message);
+    console.warn('[socket] connect_error', err.message, 'url=', url ?? window.location.origin);
   });
 
   return socket;
+}
+
+/** Wait until socket is connected (call invite / WebRTC signaling). */
+export function whenSocketConnected(timeoutMs = 8000): Promise<Socket> {
+  const s = connectSocket();
+  if (s.connected) return Promise.resolve(s);
+  return new Promise((resolve, reject) => {
+    const t = window.setTimeout(() => {
+      s.off('connect', onConnect);
+      reject(new Error('Socket connection timeout — check API / VITE_API_URL'));
+    }, timeoutMs);
+    function onConnect() {
+      window.clearTimeout(t);
+      resolve(s);
+    }
+    s.once('connect', onConnect);
+  });
 }
 
 export function disconnectSocket() {

@@ -399,8 +399,9 @@ export function ConversationPage() {
     try {
       const callData = await startCall(peer.id, type);
       const name = encodeURIComponent(peer.name || callData.peer?.name || '');
+      const room = encodeURIComponent(callData.roomName || '');
       navigate(
-        `/home/call/${type === 'VOICE' ? 'voice' : 'video'}/${peer.id}?callId=${callData.id}&role=caller&name=${name}`,
+        `/home/call/${type === 'VOICE' ? 'voice' : 'video'}/${peer.id}?callId=${callData.id}&role=caller&name=${name}&room=${room}`,
       );
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Call failed');
