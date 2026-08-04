@@ -479,7 +479,7 @@ export function ConversationPage() {
   }
 
   return (
-    <div className="chat-thread relative mx-auto flex h-[calc(100dvh-var(--header-h)-var(--bottom-nav-h)-1.5rem)] max-h-[860px] w-full max-w-3xl flex-col overflow-hidden rounded-[28px] border border-white/40 bg-gradient-to-b from-slate-50/90 via-white/80 to-primary/[0.06] shadow-float backdrop-blur-xl dark:border-slate-700/60 dark:from-slate-900/90 dark:via-slate-900/80 dark:to-slate-950 lg:h-[min(80dvh,820px)]">
+    <div className="chat-thread relative mx-auto flex max-h-[min(80dvh,860px)] min-h-[min(70dvh,520px)] w-full max-w-3xl flex-col overflow-hidden rounded-[28px] border border-white/40 bg-gradient-to-b from-slate-50/90 via-white/80 to-primary/[0.06] shadow-float backdrop-blur-xl dark:border-slate-700/60 dark:from-slate-900/90 dark:via-slate-900/80 dark:to-slate-950 lg:h-[min(80dvh,820px)] lg:max-h-none">
       {/* Sticky header */}
       <header className="sticky top-0 z-20 flex shrink-0 items-center gap-2 border-b border-white/50 bg-white/70 px-2 py-2.5 backdrop-blur-xl dark:border-slate-700/50 dark:bg-slate-900/70 sm:gap-3 sm:px-3">
         <Link

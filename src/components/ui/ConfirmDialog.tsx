@@ -1,4 +1,5 @@
 import { Button } from './Button';
+import { useBodyScrollLock } from '../../hooks/useBodyScrollLock';
 
 interface ConfirmDialogProps {
   open: boolean;
@@ -23,11 +24,12 @@ export function ConfirmDialog({
   onConfirm,
   onCancel,
 }: ConfirmDialogProps) {
+  useBodyScrollLock(open);
   if (!open) return null;
 
   return (
     <div
-      className="fixed inset-0 z-[60] flex items-end justify-center bg-black/50 p-0 sm:items-center sm:p-4"
+      className="fixed inset-0 z-[60] flex items-end justify-center overflow-y-auto bg-black/50 p-0 sm:items-center sm:p-4"
       role="presentation"
       onClick={onCancel}
     >

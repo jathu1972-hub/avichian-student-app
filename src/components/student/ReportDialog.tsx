@@ -1,6 +1,7 @@
 import { AnimatePresence, motion } from 'framer-motion';
 import { AlertTriangle, X } from 'lucide-react';
 import { useState } from 'react';
+import { useBodyScrollLock } from '../../hooks/useBodyScrollLock';
 import {
   REPORT_REASONS,
   type ReportTargetType,
@@ -35,6 +36,7 @@ export function ReportDialog({
   const [details, setDetails] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
+  useBodyScrollLock(open);
 
   function reset() {
     setStep('menu');

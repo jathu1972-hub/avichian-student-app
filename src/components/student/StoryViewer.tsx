@@ -11,6 +11,7 @@ import {
   reportStory,
 } from '../../lib/social';
 import { resolveMediaUrl } from '../../lib/config';
+import { useBodyScrollLock } from '../../hooks/useBodyScrollLock';
 import { isVideoMedia } from '../../lib/media';
 import { ContentMenu } from './ContentMenu';
 import { ConfirmDialog } from '../ui/ConfirmDialog';
@@ -44,6 +45,7 @@ function formatTime(iso: string) {
 }
 
 export function StoryViewer({ group, onClose, onStoryRemoved, toast }: StoryViewerProps) {
+  useBodyScrollLock(Boolean(group));
   const [index, setIndex] = useState(0);
   const [mediaLoading, setMediaLoading] = useState(true);
   const [mediaError, setMediaError] = useState('');

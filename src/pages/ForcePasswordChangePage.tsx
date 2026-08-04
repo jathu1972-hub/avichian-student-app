@@ -123,7 +123,7 @@ export function ForcePasswordChangePage() {
   }
 
   return (
-    <div className="relative min-h-dvh overflow-x-hidden bg-gradient-to-b from-amber-50 via-background to-primary/5 px-safe py-10 dark:from-slate-950 dark:via-slate-900 dark:to-slate-950">
+    <div className="relative min-h-dvh bg-gradient-to-b from-amber-50 via-background to-primary/5 px-safe py-10 dark:from-slate-950 dark:via-slate-900 dark:to-slate-950">
       <motion.div
         initial={{ opacity: 0, y: 12 }}
         animate={{ opacity: 1, y: 0 }}

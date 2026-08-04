@@ -71,7 +71,7 @@ export function CreateHubPage() {
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
       exit={{ opacity: 0 }}
-      className="relative mx-auto flex min-h-[min(78dvh,720px)] w-full max-w-lg flex-col overflow-hidden rounded-[32px] border border-white/50 bg-gradient-to-b from-white/90 via-slate-50/80 to-primary/[0.07] shadow-float backdrop-blur-2xl dark:border-slate-700/60 dark:from-slate-900/95 dark:via-slate-900/90 dark:to-violet-950/40"
+      className="relative mx-auto flex w-full max-w-lg flex-col rounded-[32px] border border-white/50 bg-gradient-to-b from-white/90 via-slate-50/80 to-primary/[0.07] p-1 shadow-float backdrop-blur-2xl dark:border-slate-700/60 dark:from-slate-900/95 dark:via-slate-900/90 dark:to-violet-950/40"
     >
       {/* Ambient orbs */}
       <div

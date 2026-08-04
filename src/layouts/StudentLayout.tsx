@@ -18,6 +18,7 @@ import {
 import { useEffect, useState } from 'react';
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
+import { useBodyScrollLock } from '../hooks/useBodyScrollLock';
 import { isStaffRole } from '../lib/portal';
 import { StudentAvatar } from '../components/student/StudentAvatar';
 import { IncomingCallBanner } from '../components/student/IncomingCallBanner';
@@ -105,13 +106,16 @@ export function StudentLayout() {
     setSearchOpen(false);
   }, [location.pathname]);
 
+  // Lock page scroll only while mobile drawer is open; always restore after
+  useBodyScrollLock(drawerOpen);
+
   async function handleLogout() {
     await logout();
     navigate('/login');
   }
 
   return (
-    <div className="min-h-dvh bg-gradient-to-b from-slate-50 via-white to-primary/5 dark:from-slate-950 dark:via-slate-900 dark:to-slate-950">
+    <div className="app-shell bg-gradient-to-b from-slate-50 via-white to-primary/5 dark:from-slate-950 dark:via-slate-900 dark:to-slate-950">
       <IncomingCallBanner />
       {/* Desktop / tablet sidebar */}
       <aside
@@ -209,8 +213,8 @@ export function StudentLayout() {
         </div>
       ) : null}
 
-      {/* Main column */}
-      <div className="flex min-h-dvh flex-col lg:pl-64">
+      {/* Main column — grows with content; document scrolls (no overflow trap) */}
+      <div className="app-shell-main-col lg:pl-64">
         <header className="sticky top-0 z-20 border-b border-white/40 bg-white/80 pt-safe backdrop-blur-xl dark:border-slate-800 dark:bg-slate-900/85">
           <div className="mx-auto flex w-full max-w-6xl items-center gap-2 px-safe py-2.5 sm:gap-3 sm:py-3">
             <button
@@ -322,13 +326,13 @@ export function StudentLayout() {
           ) : null}
         </header>
 
-        <main className="main-with-bottom-nav mx-auto w-full max-w-6xl flex-1 min-w-0 px-safe py-3 sm:py-4 lg:py-6">
+        <main className="main-with-bottom-nav mx-auto w-full max-w-6xl px-safe py-3 sm:py-4 lg:py-6">
           <Outlet />
         </main>
 
-        {/* Mobile bottom navigation */}
+        {/* Mobile bottom navigation — fixed; content padded via main-with-bottom-nav */}
         <nav
-          className="fixed bottom-0 left-0 right-0 z-20 border-t border-white/50 bg-white/90 backdrop-blur-xl dark:border-slate-800 dark:bg-slate-900/95 lg:hidden pb-safe"
+          className="bottom-nav fixed bottom-0 left-0 right-0 z-30 border-t border-white/50 bg-white/95 backdrop-blur-xl dark:border-slate-800 dark:bg-slate-900/95 lg:hidden"
           aria-label="Bottom navigation"
         >
           <div className="mx-auto flex max-w-lg items-end justify-between px-1 py-1.5">

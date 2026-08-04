@@ -54,7 +54,7 @@ export function LoginPage() {
   }
 
   return (
-    <div className="relative min-h-dvh overflow-x-hidden bg-gradient-to-b from-secondary/20 via-background to-background px-safe py-8 sm:py-10 md:py-14">
+    <div className="relative min-h-dvh bg-gradient-to-b from-secondary/20 via-background to-background px-safe py-8 sm:py-10 md:py-14">
       <motion.div
         initial={{ opacity: 0, scale: 0.98 }}
         animate={{ opacity: 1, scale: 1 }}

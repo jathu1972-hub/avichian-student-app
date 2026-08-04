@@ -277,7 +277,7 @@ export function ReelsPage() {
 
       <div
         ref={scrollerRef}
-        className="h-[min(calc(100dvh-8.5rem),780px)] snap-y snap-mandatory overflow-y-scroll overscroll-y-contain rounded-[24px] bg-black shadow-float"
+        className="scroll-region h-[min(calc(100dvh-9.5rem),780px)] max-h-[calc(100dvh-9.5rem)] snap-y snap-mandatory overflow-y-auto overscroll-y-contain rounded-[24px] bg-black shadow-float"
         style={{ WebkitOverflowScrolling: 'touch' }}
       >
         {reels.map((reel) => (
