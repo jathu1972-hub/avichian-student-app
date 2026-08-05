@@ -1,4 +1,10 @@
-import { API_UNREACHABLE_MESSAGE, getApiBase, isProductionFrontend } from './config';
+import { getApiBase, isProductionFrontend } from './config';
+import {
+  ApiClientError,
+  classifyHttpFailure,
+  classifyNetworkFailure,
+  readJwtExpiryMs,
+} from './errors';
 
 /** REST base: `/api` (dev proxy) or `https://api…/api` (production). */
 function apiBase(): string {
@@ -7,19 +13,16 @@ function apiBase(): string {
 
 let csrfTokenCache: string | null = null;
 let refreshPromise: Promise<string | null> | null = null;
+let proactiveRefreshTimer: number | null = null;
 
 const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 
-function networkErrorMessage(): string {
-  if (isProductionFrontend()) return API_UNREACHABLE_MESSAGE;
-  // Developers only (never shown on github.io)
-  return `${API_UNREACHABLE_MESSAGE} (dev: is the API reachable and is VITE_API_URL / Vite proxy correct?)`;
-}
-
 /**
- * Parse fetch body as JSON. Rejects HTML/SPA shells with a clear message.
+ * Parse fetch body as JSON. Rejects HTML/SPA shells with a clear cause.
  */
-export async function parseApiJson<T = Record<string, unknown>>(res: Response): Promise<T> {
+export async function parseApiJson<T = Record<string, unknown>>(
+  res: Response,
+): Promise<{ json: T; rawText: string; isHtml: boolean }> {
   const contentType = res.headers.get('content-type') ?? '';
   const text = await res.text();
   const trimmed = text.trimStart();
@@ -34,26 +37,15 @@ export async function parseApiJson<T = Record<string, unknown>>(res: Response): 
       status: res.status,
       contentType,
       preview: trimmed.slice(0, 200),
-      apiBase: (() => {
-        try {
-          return apiBase();
-        } catch {
-          return '(unconfigured)';
-        }
-      })(),
     });
-    throw new Error(
-      isProductionFrontend()
-        ? API_UNREACHABLE_MESSAGE
-        : `Expected JSON from the API but received HTML (HTTP ${res.status}). Check VITE_API_URL / reverse proxy.`,
-    );
+    throw classifyHttpFailure(res.status, null, 'html');
   }
 
   if (!trimmed) {
     if (!res.ok) {
-      throw new Error(`Empty response from API (HTTP ${res.status})`);
+      throw classifyHttpFailure(res.status, { error: `Empty response (HTTP ${res.status})` });
     }
-    return {} as T;
+    return { json: {} as T, rawText: text, isHtml: false };
   }
 
   if (!contentType.includes('application/json') && !trimmed.startsWith('{') && !trimmed.startsWith('[')) {
@@ -62,19 +54,20 @@ export async function parseApiJson<T = Record<string, unknown>>(res: Response): 
       contentType,
       preview: trimmed.slice(0, 200),
     });
-    throw new Error(
-      isProductionFrontend()
-        ? API_UNREACHABLE_MESSAGE
-        : `Expected JSON from the API (HTTP ${res.status}). Body starts with: ${trimmed.slice(0, 80)}`,
+    throw new ApiClientError(
+      'server',
+      `Server returned non-JSON (HTTP ${res.status}, Content-Type: ${contentType || 'missing'}). Body: ${trimmed.slice(0, 100)}`,
+      { status: res.status },
     );
   }
 
   try {
-    return JSON.parse(text) as T;
+    return { json: JSON.parse(text) as T, rawText: text, isHtml: false };
   } catch {
-    console.error('[AVICHIAN] Invalid JSON', { status: res.status, preview: trimmed.slice(0, 200) });
-    throw new Error(
-      isProductionFrontend() ? API_UNREACHABLE_MESSAGE : `Invalid JSON from API (HTTP ${res.status})`,
+    throw new ApiClientError(
+      'server',
+      `Invalid JSON from API (HTTP ${res.status}). Body: ${trimmed.slice(0, 100)}`,
+      { status: res.status },
     );
   }
 }
@@ -99,17 +92,15 @@ export async function prefetchCsrfToken(): Promise<string> {
     res = await fetch(`${apiBase()}/csrf-token`, { credentials: 'include' });
   } catch (err) {
     console.error('[AVICHIAN] CSRF fetch failed', err);
-    throw new Error(networkErrorMessage());
+    throw classifyNetworkFailure(err);
   }
-  const json = await parseApiJson<{ data?: { csrfToken?: string }; error?: string }>(res);
+  const { json } = await parseApiJson<{ data?: { csrfToken?: string }; error?: string }>(res);
   if (!res.ok) {
-    throw new Error(
-      (typeof json.error === 'string' && json.error) || networkErrorMessage(),
-    );
+    throw classifyHttpFailure(res.status, json);
   }
   const token = json?.data?.csrfToken;
   if (!token) {
-    throw new Error('CSRF token missing from API response');
+    throw new ApiClientError('server', 'CSRF token missing from API response');
   }
   csrfTokenCache = token;
   return token;
@@ -132,13 +123,35 @@ async function ensureCsrf(forceRefresh = false): Promise<string> {
 export function setAccessToken(token: string | null) {
   if (token) {
     localStorage.setItem('avichian_access_token', token);
+    scheduleProactiveRefresh(token);
   } else {
     localStorage.removeItem('avichian_access_token');
+    if (proactiveRefreshTimer) {
+      window.clearTimeout(proactiveRefreshTimer);
+      proactiveRefreshTimer = null;
+    }
   }
 }
 
 export function getAccessToken(): string | null {
   return localStorage.getItem('avichian_access_token');
+}
+
+/** Refresh access token ~60s before JWT exp (silent). */
+function scheduleProactiveRefresh(token: string) {
+  if (typeof window === 'undefined') return;
+  if (proactiveRefreshTimer) {
+    window.clearTimeout(proactiveRefreshTimer);
+    proactiveRefreshTimer = null;
+  }
+  const expMs = readJwtExpiryMs(token);
+  if (!expMs) return;
+  const delay = Math.max(5_000, expMs - Date.now() - 60_000);
+  proactiveRefreshTimer = window.setTimeout(() => {
+    void refreshAccessToken().then((t) => {
+      if (t) scheduleProactiveRefresh(t);
+    });
+  }, delay);
 }
 
 export async function refreshAccessToken(): Promise<string | null> {
@@ -151,8 +164,13 @@ export async function refreshAccessToken(): Promise<string | null> {
           credentials: 'include',
           headers: { 'X-CSRF-Token': csrf },
         });
-        if (!res.ok) return null;
-        const json = await parseApiJson<{
+        if (!res.ok) {
+          if (res.status === 401) {
+            setAccessToken(null);
+          }
+          return null;
+        }
+        const { json } = await parseApiJson<{
           data?: { accessToken?: string; csrfToken?: string };
         }>(res);
         if (!json.data?.accessToken) return null;
@@ -161,7 +179,8 @@ export async function refreshAccessToken(): Promise<string | null> {
           setCsrfToken(json.data.csrfToken);
         }
         return json.data.accessToken;
-      } catch {
+      } catch (err) {
+        console.warn('[AVICHIAN] refresh failed', err);
         return null;
       } finally {
         refreshPromise = null;
@@ -171,14 +190,35 @@ export async function refreshAccessToken(): Promise<string | null> {
   return refreshPromise;
 }
 
+// Kick proactive refresh for existing session after reload
+if (typeof window !== 'undefined') {
+  const existing = localStorage.getItem('avichian_access_token');
+  if (existing) scheduleProactiveRefresh(existing);
+}
+
 export async function api<T>(
   path: string,
   options: RequestInit = {},
-  retryState: { auth?: boolean; csrf?: boolean } = { auth: true, csrf: true },
+  retryState: { auth?: boolean; csrf?: boolean; network?: boolean } = {
+    auth: true,
+    csrf: true,
+    network: true,
+  },
 ): Promise<{ success: boolean; data?: T; error?: string; message?: string; code?: string }> {
   const method = (options.method ?? 'GET').toUpperCase();
   const needsCsrf = MUTATING_METHODS.has(method);
-  const csrf = needsCsrf ? await ensureCsrf() : null;
+  let csrf: string | null = null;
+  try {
+    csrf = needsCsrf ? await ensureCsrf() : null;
+  } catch (err) {
+    // One automatic retry after brief wait (tunnel blip)
+    if (retryState.network) {
+      await new Promise((r) => setTimeout(r, 800));
+      return api<T>(path, options, { ...retryState, network: false });
+    }
+    throw err instanceof ApiClientError ? err : classifyNetworkFailure(err);
+  }
+
   const accessToken = getAccessToken();
 
   const headers: Record<string, string> = {
@@ -207,20 +247,28 @@ export async function api<T>(
     });
   } catch (err) {
     console.error('[AVICHIAN] Network error', path, err);
-    throw new Error(networkErrorMessage());
+    if (retryState.network) {
+      await new Promise((r) => setTimeout(r, 1000));
+      return api<T>(path, options, { ...retryState, network: false });
+    }
+    throw classifyNetworkFailure(err);
   }
 
-  if (!res.ok) {
-    // Still parse body for structured errors when possible
+  let parsed: {
+    json: {
+      success?: boolean;
+      data?: T & { csrfToken?: string };
+      error?: string;
+      message?: string;
+      code?: string;
+    };
+  };
+  try {
+    parsed = await parseApiJson(res);
+  } catch (err) {
+    throw err;
   }
-
-  const json = await parseApiJson<{
-    success?: boolean;
-    data?: T & { csrfToken?: string };
-    error?: string;
-    message?: string;
-    code?: string;
-  }>(res);
+  const json = parsed.json;
 
   if (
     res.status === 403 &&
@@ -241,14 +289,20 @@ export async function api<T>(
     if (accessToken) {
       setAccessToken(null);
     }
+    throw classifyHttpFailure(401, json);
   }
 
   if (!res.ok) {
-    throw new Error(
-      (typeof json.error === 'string' && json.error) ||
-        (typeof json.message === 'string' && json.message) ||
-        `Request failed (HTTP ${res.status})`,
-    );
+    const isUpload = path.includes('upload') || isFormData;
+    if (isUpload && res.status >= 400) {
+      const base = classifyHttpFailure(res.status, json);
+      throw new ApiClientError(
+        'upload',
+        base.message.startsWith('Upload') ? base.message : `Upload failed: ${base.message}`,
+        { status: res.status, code: base.code },
+      );
+    }
+    throw classifyHttpFailure(res.status, json);
   }
 
   if (json.data && typeof json.data === 'object' && 'csrfToken' in json.data && json.data.csrfToken) {
@@ -256,4 +310,11 @@ export async function api<T>(
   }
 
   return json as { success: boolean; data?: T; error?: string; message?: string; code?: string };
+}
+
+/** @deprecated kept for call sites that imported this name */
+export function networkErrorMessage(): string {
+  return isProductionFrontend()
+    ? 'Backend offline or unreachable. The API server may be down or the public tunnel expired.'
+    : 'Backend offline or unreachable. Check API process and VITE_API_URL / Vite proxy.';
 }

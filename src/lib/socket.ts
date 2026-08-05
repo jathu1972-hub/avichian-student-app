@@ -1,37 +1,103 @@
 import { io, type Socket } from 'socket.io-client';
-import { getAccessToken } from './api';
+import { getAccessToken, refreshAccessToken } from './api';
 import { getSocketUrl } from './config';
 
 let socket: Socket | null = null;
 let lastToken: string | null = null;
+let handlersBound = false;
+
+type ConnListener = (connected: boolean) => void;
+const connListeners = new Set<ConnListener>();
+
+export function onSocketConnectionChange(fn: ConnListener): () => void {
+  connListeners.add(fn);
+  return () => connListeners.delete(fn);
+}
+
+function emitConn(connected: boolean) {
+  connListeners.forEach((fn) => {
+    try {
+      fn(connected);
+    } catch {
+      /* ignore */
+    }
+  });
+}
 
 export function getSocket(): Socket | null {
   return socket;
 }
 
+function bindLifecycle(s: Socket) {
+  if (handlersBound) return;
+  handlersBound = true;
+
+  s.on('connect', () => {
+    console.info('[socket] connected', s.id);
+    emitConn(true);
+  });
+
+  s.on('disconnect', (reason) => {
+    console.warn('[socket] disconnected', reason);
+    emitConn(false);
+    // Socket.IO auto-reconnects for most reasons; force reconnect if server kicked us
+    if (reason === 'io server disconnect') {
+      s.connect();
+    }
+  });
+
+  s.on('connect_error', (err) => {
+    console.warn('[socket] connect_error', err.message);
+    emitConn(false);
+  });
+
+  s.io.on('reconnect_attempt', (n) => {
+    console.info('[socket] reconnect_attempt', n);
+    // Keep auth fresh on reconnect
+    const token = getAccessToken();
+    s.auth = { token };
+    lastToken = token;
+  });
+
+  s.io.on('reconnect', (n) => {
+    console.info('[socket] reconnected', n);
+    emitConn(true);
+  });
+
+  s.io.on('reconnect_failed', () => {
+    console.error('[socket] reconnect_failed — will keep trying via new connect()');
+    // Don't give up forever: try again after delay
+    window.setTimeout(() => {
+      if (!s.connected) {
+        void refreshAccessToken().finally(() => {
+          s.auth = { token: getAccessToken() };
+          s.connect();
+        });
+      }
+    }, 5000);
+  });
+}
+
 /**
  * Connect (or reconnect) Socket.IO with the current JWT.
- * Dev: connects to same origin so Vite proxies /socket.io → :4000.
- * Prod: VITE_API_URL origin.
+ * Dev: same origin → Vite proxy. Prod: API origin from config.
+ * Auto-reconnect is always enabled.
  */
 export function connectSocket(): Socket {
   const token = getAccessToken();
-  // Prefer explicit API origin (production / tunnel). Dev: same origin → Vite proxy.
   const url = getSocketUrl();
 
   if (socket && lastToken === token && socket.connected) {
     return socket;
   }
 
-  // Token refresh: update auth only — do NOT removeAllListeners (would drop
-  // IncomingCallBanner / CallPage / Friends socket handlers).
+  // Token refresh: update auth only — do NOT removeAllListeners
   if (socket && lastToken !== token) {
     socket.auth = { token };
     lastToken = token;
     if (!socket.connected) {
       socket.connect();
     } else {
-      // Force reconnect with new JWT so server re-joins user room
       socket.disconnect();
       socket.connect();
     }
@@ -49,32 +115,35 @@ export function connectSocket(): Socket {
   socket = io(url ?? window.location.origin, {
     path: '/socket.io',
     auth: { token },
-    // Prefer websocket; fall back to polling through proxies/tunnels
     transports: ['websocket', 'polling'],
     autoConnect: true,
     withCredentials: true,
     reconnection: true,
-    reconnectionAttempts: 30,
+    reconnectionAttempts: Infinity,
     reconnectionDelay: 500,
-    reconnectionDelayMax: 5000,
+    reconnectionDelayMax: 8000,
+    randomizationFactor: 0.4,
     timeout: 20000,
   });
 
-  socket.on('connect_error', (err) => {
-    console.warn('[socket] connect_error', err.message, 'url=', url ?? window.location.origin);
-  });
+  handlersBound = false;
+  bindLifecycle(socket);
 
   return socket;
 }
 
 /** Wait until socket is connected (call invite / WebRTC signaling). */
-export function whenSocketConnected(timeoutMs = 8000): Promise<Socket> {
+export function whenSocketConnected(timeoutMs = 12000): Promise<Socket> {
   const s = connectSocket();
   if (s.connected) return Promise.resolve(s);
   return new Promise((resolve, reject) => {
     const t = window.setTimeout(() => {
       s.off('connect', onConnect);
-      reject(new Error('Unable to connect to the server. Please try again later.'));
+      reject(
+        new Error(
+          'Realtime connection timed out. Chat and calls need Socket.IO — check that the API is online.',
+        ),
+      );
     }, timeoutMs);
     function onConnect() {
       window.clearTimeout(t);
@@ -87,10 +156,13 @@ export function whenSocketConnected(timeoutMs = 8000): Promise<Socket> {
 export function disconnectSocket() {
   if (socket) {
     socket.removeAllListeners();
+    socket.io.removeAllListeners();
     socket.disconnect();
     socket = null;
   }
+  handlersBound = false;
   lastToken = null;
+  emitConn(false);
 }
 
 export function joinConversation(conversationId: string) {

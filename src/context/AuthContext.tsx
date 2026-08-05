@@ -117,10 +117,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     import('../lib/socket').then(({ connectSocket }) => {
       if (!cancelled) connectSocket();
     });
+    // Keep JWT fresh while app is open (also scheduled from setAccessToken)
+    const refreshTick = window.setInterval(() => {
+      void refreshAccessToken();
+    }, 10 * 60 * 1000);
     return () => {
       cancelled = true;
-      import('../lib/socket').then(({ disconnectSocket }) => disconnectSocket());
+      window.clearInterval(refreshTick);
+      // Do not hard-disconnect socket on every user identity re-render path —
+      // only when leaving authenticated state (handled below).
     };
+  }, [user]);
+
+  useEffect(() => {
+    if (user) return;
+    // Logged out → drop socket
+    import('../lib/socket').then(({ disconnectSocket }) => disconnectSocket());
   }, [user]);
 
   const login = useCallback(async (regNo: string, password: string, rememberMe = false) => {
