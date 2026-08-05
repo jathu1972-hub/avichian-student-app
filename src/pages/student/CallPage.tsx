@@ -1,6 +1,8 @@
 import {
+  FlipHorizontal2,
   Mic,
   MicOff,
+  MonitorUp,
   PhoneOff,
   Signal,
   SwitchCamera,
@@ -12,7 +14,8 @@ import {
 import { Room, RoomEvent, Track, createLocalTracks, type LocalTrack } from 'livekit-client';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
-import { Button } from '../../components/ui/Button';
+import { StudentAvatar } from '../../components/student/StudentAvatar';
+import { stopIncomingRingtone } from '../../lib/ringtone';
 import {
   fetchCallIceConfig,
   fetchLiveKitToken,
@@ -71,7 +74,11 @@ export function CallPage({ mode }: { mode: 'voice' | 'video' }) {
   const [connected, setConnected] = useState(false);
   const [quality, setQuality] = useState('—');
   const [facingMode, setFacingMode] = useState<'user' | 'environment'>('user');
+  const [mirrorSelf, setMirrorSelf] = useState(true);
+  const [switchingCam, setSwitchingCam] = useState(false);
   const [mediaMode, setMediaMode] = useState<'livekit' | 'webrtc'>('webrtc');
+  const facingModeRef = useRef<'user' | 'environment'>('user');
+  const videoDeviceIdsRef = useRef<string[]>([]);
 
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
@@ -85,6 +92,8 @@ export function CallPage({ mode }: { mode: 'voice' | 'video' }) {
   const makingOfferRef = useRef(false);
   const answeringRef = useRef(false);
   const offerSentRef = useRef(false);
+  /** True after we successfully applied a local answer (prevents double answer). */
+  const answerSentRef = useRef(false);
   const ignoreOfferRef = useRef(false);
   const lastRemoteOfferKeyRef = useRef<string>('');
   const lastRemoteAnswerKeyRef = useRef<string>('');
@@ -95,25 +104,40 @@ export function CallPage({ mode }: { mode: 'voice' | 'video' }) {
   const pcReadyRef = useRef(false);
   const peerAcceptedRef = useRef(role === 'callee'); // callee is already accepted
   const iceConfigRef = useRef<CallIceConfig | null>(null);
+  /** Serialize all SDP/ICE processing so concurrent socket events cannot race. */
+  const signalQueueRef = useRef<Promise<void>>(Promise.resolve());
 
   function sdpKey(sdp: RTCSessionDescriptionInit | undefined): string {
-    return `${sdp?.type ?? ''}:${(sdp?.sdp ?? '').slice(0, 120)}`;
+    return `${sdp?.type ?? ''}:${(sdp?.sdp ?? '').slice(0, 160)}`;
   }
 
-  /** Only show user-facing errors when the call is not already connected. */
+  function isBenignSdpError(msg: string): boolean {
+    return /setLocalDescription|setRemoteDescription|wrong state|stable|have-local-offer|have-remote-offer|Called in wrong state|InvalidStateError|m-lines|SessionDescription/i.test(
+      msg,
+    );
+  }
+
+  /**
+   * Log signaling issues. Never show raw WebRTC stack traces on the call UI.
+   * If media is already connected, stay silent for the user.
+   */
   function reportSignalingIssue(err: unknown, context: string) {
     const msg = err instanceof Error ? err.message : String(err);
     console.warn(`[call] ${context}:`, msg, {
       signalingState: pcRef.current?.signalingState,
       connectionState: pcRef.current?.connectionState,
+      iceConnectionState: pcRef.current?.iceConnectionState,
     });
-    if (!connectedRef.current && !endedRef.current) {
-      // Keep messaging friendly — never dump raw WebRTC stack traces
-      if (/setLocalDescription|setRemoteDescription|wrong state/i.test(msg)) {
-        // Duplicate / late SDP is common; ignore for UI if media may still work
-        return;
-      }
-      setError(msg.length > 120 ? 'Connection issue — trying to recover…' : msg);
+    // Connected (or connecting with media) → no UI noise
+    if (connectedRef.current || endedRef.current) return;
+    if (isBenignSdpError(msg)) return;
+    // Only surface real failures
+    setError('Connection issue — trying to recover…');
+  }
+
+  function clearUiErrorIfConnected() {
+    if (connectedRef.current) {
+      setError('');
     }
   }
 
@@ -121,7 +145,7 @@ export function CallPage({ mode }: { mode: 'voice' | 'video' }) {
     (signal: SignalPayload) => {
       if (!peerId) return;
       const socket = connectSocket();
-      // Single channel for SDP/ICE — avoids duplicate setLocalDescription from dual relays
+      // Single channel for SDP/ICE — named hangup/reject only for hangup lifecycle
       socket.emit('call:signal', {
         toUserId: peerId,
         type: mode === 'video' ? 'VIDEO' : 'VOICE',
@@ -132,9 +156,8 @@ export function CallPage({ mode }: { mode: 'voice' | 'video' }) {
         socket.emit('callEnded', { toUserId: peerId, callId, reason: signal.reason });
       } else if (signal.type === 'reject') {
         socket.emit('callRejected', { toUserId: peerId, callId });
-      } else if (signal.type === 'accepted') {
-        socket.emit('callAccepted', { toUserId: peerId, callId });
       }
+      // Do not re-emit callAccepted here — banner already notified the peer
     },
     [peerId, mode, callId],
   );
@@ -212,7 +235,9 @@ export function CallPage({ mode }: { mode: 'voice' | 'video' }) {
         console.warn('[call] skip createOffer, state=', pc.signalingState);
         return;
       }
+      // Claim the offer slot before any await (prevents dual accepted/ready race)
       makingOfferRef.current = true;
+      offerSentRef.current = true;
       try {
         const offer = await pc.createOffer({
           offerToReceiveAudio: true,
@@ -220,13 +245,14 @@ export function CallPage({ mode }: { mode: 'voice' | 'video' }) {
         });
         if (pc.signalingState !== 'stable') {
           console.warn('[call] abort setLocalDescription(offer), state changed to', pc.signalingState);
+          offerSentRef.current = false;
           return;
         }
         await pc.setLocalDescription(offer);
-        offerSentRef.current = true;
         emitSignal({ type: 'offer', sdp: pc.localDescription ?? offer });
         setStatus('Ringing…');
       } catch (err) {
+        offerSentRef.current = false;
         reportSignalingIssue(err, 'createOffer/setLocalDescription');
       } finally {
         makingOfferRef.current = false;
@@ -248,10 +274,11 @@ export function CallPage({ mode }: { mode: 'voice' | 'video' }) {
 
     async function processSignal(signal: SignalPayload) {
       if (signal.type === 'ready' || signal.type === 'accepted') {
+        // Dedup dual-channel accepted/ready; still allow offer if first race lost the claim
+        if (peerAcceptedRef.current && offerSentRef.current) return;
         peerAcceptedRef.current = true;
         setStatus('Answered — connecting…');
         if (role === 'caller' && iceConfigRef.current?.mediaMode !== 'livekit') {
-          // Only first accepted/ready should create the offer
           await createAndSendOffer();
         }
         return;
@@ -273,58 +300,71 @@ export function CallPage({ mode }: { mode: 'voice' | 'video' }) {
       try {
         if (signal.type === 'offer' && signal.sdp) {
           const key = sdpKey(signal.sdp);
-          // Ignore exact duplicate offers (call:signal + named "offer" event)
+
+          // Already answered this call (or this exact offer)
+          if (answerSentRef.current) {
+            console.warn('[call] ignore offer — answer already sent');
+            return;
+          }
           if (key && key === lastRemoteOfferKeyRef.current) {
             console.warn('[call] ignore duplicate offer');
             return;
           }
-
-          const offerCollision =
-            makingOfferRef.current || pc.signalingState !== 'stable';
-          ignoreOfferRef.current = !isPolite && offerCollision;
-          if (ignoreOfferRef.current) {
-            console.warn('[call] ignore offer (glare, impolite)', pc.signalingState);
-            return;
-          }
-
-          // Already answering / already have remote offer — do not answer twice
           if (answeringRef.current) {
             console.warn('[call] ignore offer, already answering');
             return;
           }
-          if (pc.signalingState === 'have-remote-offer' || pc.signalingState === 'stable') {
-            // have-remote-offer: might be re-offer; only accept if we haven't answered this SDP
-            if (pc.signalingState === 'have-remote-offer' && pc.currentRemoteDescription) {
-              const existingKey = sdpKey(pc.currentRemoteDescription);
-              if (existingKey === key) {
-                console.warn('[call] ignore re-delivery of same remote offer');
-                return;
-              }
-            }
-          } else if (pc.signalingState === 'have-local-pranswer' || pc.signalingState === 'have-remote-pranswer') {
-            return;
-          } else if (pc.signalingState !== 'have-local-offer') {
-            // unexpected
-            console.warn('[call] skip offer in state', pc.signalingState);
+
+          const state = pc.signalingState;
+          const offerCollision = makingOfferRef.current || state !== 'stable';
+          ignoreOfferRef.current = !isPolite && offerCollision;
+          if (ignoreOfferRef.current) {
+            console.warn('[call] ignore offer (glare, impolite)', state);
             return;
           }
 
+          // Only accept offers when we can move to have-remote-offer
+          // stable → new offer; have-local-offer → polite glare (rollback); have-remote-offer → only if different SDP
+          if (state === 'have-remote-offer' && pc.currentRemoteDescription) {
+            if (sdpKey(pc.currentRemoteDescription) === key) {
+              console.warn('[call] ignore re-delivery of same remote offer');
+              return;
+            }
+            // Different re-offer while still answering → ignore (single answer only)
+            console.warn('[call] ignore new offer while already have-remote-offer');
+            return;
+          }
+          if (state === 'have-local-pranswer' || state === 'have-remote-pranswer') {
+            return;
+          }
+          if (state !== 'stable' && state !== 'have-local-offer') {
+            console.warn('[call] skip offer in state', state);
+            return;
+          }
+
+          // Claim immediately (before any await) so dual sockets cannot double-answer
           answeringRef.current = true;
+          lastRemoteOfferKeyRef.current = key;
           try {
             await pc.setRemoteDescription(signal.sdp);
-            lastRemoteOfferKeyRef.current = key;
             await flushIce();
 
-            // Critical: only answer when we actually have a remote offer pending
+            // MUST only create/set answer when have-remote-offer
             if (pc.signalingState !== 'have-remote-offer') {
               console.warn(
-                '[call] skip createAnswer/setLocalDescription — signalingState is',
+                '[call] skip createAnswer — signalingState is',
                 pc.signalingState,
               );
               return;
             }
+            if (answerSentRef.current) {
+              console.warn('[call] skip createAnswer — answer already sent');
+              return;
+            }
 
             const answer = await pc.createAnswer();
+
+            // Re-check after async createAnswer — never setLocalDescription(answer) in stable
             if (pc.signalingState !== 'have-remote-offer') {
               console.warn(
                 '[call] skip setLocalDescription(answer) — state became',
@@ -332,9 +372,25 @@ export function CallPage({ mode }: { mode: 'voice' | 'video' }) {
               );
               return;
             }
+            if (answerSentRef.current) return;
+
             await pc.setLocalDescription(answer);
+            answerSentRef.current = true;
             emitSignal({ type: 'answer', sdp: pc.localDescription ?? answer });
             setStatus('Connecting…');
+            setError('');
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            // Race: second answer after state already stable — not a user-facing failure
+            if (isBenignSdpError(msg) || /stable/i.test(msg)) {
+              console.warn('[call] benign SDP race (ignored):', msg);
+              // If we already have a local answer, mark as sent
+              if (pc.localDescription?.type === 'answer') {
+                answerSentRef.current = true;
+              }
+              return;
+            }
+            throw err;
           } finally {
             answeringRef.current = false;
           }
@@ -346,16 +402,32 @@ export function CallPage({ mode }: { mode: 'voice' | 'video' }) {
           }
           // Only apply remote answer while we have a local offer out
           if (pc.signalingState !== 'have-local-offer') {
+            // Already stable = answer already applied (duplicate) — ignore quietly
+            if (pc.signalingState === 'stable' && pc.currentRemoteDescription) {
+              lastRemoteAnswerKeyRef.current = key;
+              return;
+            }
             console.warn(
               '[call] skip setRemoteDescription(answer) — signalingState is',
               pc.signalingState,
             );
             return;
           }
-          await pc.setRemoteDescription(signal.sdp);
-          lastRemoteAnswerKeyRef.current = key;
-          await flushIce();
-          setStatus('Connecting…');
+          try {
+            await pc.setRemoteDescription(signal.sdp);
+            lastRemoteAnswerKeyRef.current = key;
+            await flushIce();
+            setStatus('Connecting…');
+            setError('');
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            if (isBenignSdpError(msg)) {
+              console.warn('[call] benign answer apply race (ignored):', msg);
+              lastRemoteAnswerKeyRef.current = key;
+              return;
+            }
+            throw err;
+          }
         } else if (signal.type === 'ice' && signal.candidate) {
           if (pc.remoteDescription) {
             try {
@@ -372,10 +444,20 @@ export function CallPage({ mode }: { mode: 'voice' | 'video' }) {
       }
     }
 
+    /** Single-flight queue: dual Socket.IO events never run createAnswer in parallel. */
+    function enqueueSignal(signal: SignalPayload) {
+      signalQueueRef.current = signalQueueRef.current
+        .then(() => processSignal(signal))
+        .catch((err) => {
+          reportSignalingIssue(err, 'signalQueue');
+        });
+      return signalQueueRef.current;
+    }
+
     async function drainPendingSignals() {
       const batch = pendingSignals.current.splice(0);
       for (const s of batch) {
-        await processSignal(s);
+        await enqueueSignal(s);
       }
     }
 
@@ -441,7 +523,7 @@ export function CallPage({ mode }: { mode: 'voice' | 'video' }) {
       }
 
       if (role === 'callee') {
-        emitSignal({ type: 'accepted', callId: callId ?? undefined });
+        // Banner already sent accepted — only signal media readiness
         emitSignal({ type: 'ready' });
       }
       setStatus(role === 'caller' ? 'Waiting for peer…' : 'In room…');
@@ -474,7 +556,7 @@ export function CallPage({ mode }: { mode: 'voice' | 'video' }) {
         video:
           mode === 'video'
             ? {
-                facingMode,
+                facingMode: { ideal: facingModeRef.current },
                 width: { ideal: 1280 },
                 height: { ideal: 720 },
               }
@@ -532,7 +614,7 @@ export function CallPage({ mode }: { mode: 'voice' | 'video' }) {
           connectedRef.current = true;
           setConnected(true);
           setStatus('Connected');
-          setError(''); // clear stale signaling warnings once media works
+          setError(''); // never leave SDP noise on screen when audio works
         } else if (state === 'connecting') {
           setStatus('Connecting…');
         } else if (state === 'disconnected') {
@@ -543,7 +625,9 @@ export function CallPage({ mode }: { mode: 'voice' | 'video' }) {
             pc.restartIce();
             setStatus('Reconnecting…');
           } catch {
-            setError('Connection failed. Check network or TURN settings.');
+            if (!connectedRef.current) {
+              setError('Call could not connect. Please try again.');
+            }
             void endCall('FAILED', true);
           }
         }
@@ -562,6 +646,7 @@ export function CallPage({ mode }: { mode: 'voice' | 'video' }) {
           connectedRef.current = true;
           setConnected(true);
           setError('');
+          clearUiErrorIfConnected();
         } else if (pc.iceConnectionState === 'checking') {
           setStatus('Checking network…');
         }
@@ -572,7 +657,7 @@ export function CallPage({ mode }: { mode: 'voice' | 'video' }) {
 
       if (role === 'callee') {
         setStatus('Connecting…');
-        emitSignal({ type: 'accepted', callId: callId ?? undefined });
+        // Banner already sent accepted — only signal media readiness once
         emitSignal({ type: 'ready' });
       } else {
         setStatus('Calling…');
@@ -606,6 +691,7 @@ export function CallPage({ mode }: { mode: 'voice' | 'video' }) {
     }
 
     void setup();
+    stopIncomingRingtone();
 
     function onSignal(payload: {
       fromUserId: string;
@@ -614,25 +700,24 @@ export function CallPage({ mode }: { mode: 'voice' | 'video' }) {
     }) {
       if (payload.fromUserId !== peerId) return;
       if (payload.callId && callId && payload.callId !== callId) return;
-      void processSignal(payload.signal);
+      void enqueueSignal(payload.signal);
     }
 
-    // Prefer unified call:signal only — named events also relay the same SDP and caused
-    // duplicate setLocalDescription(answer) when both fired.
-    // Keep callAccepted / callEnded as thin aliases without SDP.
+    // Named lifecycle aliases only — SDP must not be processed twice via dual channels.
     function onAccepted(payload: { fromUserId: string; callId?: string }) {
       if (payload.fromUserId !== peerId) return;
-      void processSignal({ type: 'accepted', callId: payload.callId });
+      if (peerAcceptedRef.current && offerSentRef.current) return;
+      void enqueueSignal({ type: 'accepted', callId: payload.callId });
     }
 
     function onEnded(payload: { fromUserId: string; callId?: string }) {
       if (payload.fromUserId !== peerId) return;
-      void processSignal({ type: 'hangup' });
+      void enqueueSignal({ type: 'hangup' });
     }
 
     function onRejected(payload: { fromUserId: string }) {
       if (payload.fromUserId !== peerId) return;
-      void processSignal({ type: 'reject' });
+      void enqueueSignal({ type: 'reject' });
     }
 
     socket.on('call:signal', onSignal);
@@ -701,6 +786,8 @@ export function CallPage({ mode }: { mode: 'voice' | 'video' }) {
 
   useEffect(() => {
     if (!connected) return;
+    // Call is healthy — never leave a stale WebRTC error banner up
+    setError('');
     const timer = window.setInterval(() => {
       setSeconds((s) => {
         const next = s + 1;
@@ -743,18 +830,62 @@ export function CallPage({ mode }: { mode: 'voice' | 'video' }) {
     }
   }, [speakerOn]);
 
-  async function switchCamera() {
-    if (mode !== 'video') return;
-    const next: 'user' | 'environment' = facingMode === 'user' ? 'environment' : 'user';
+  async function acquireVideoTrack(next: 'user' | 'environment'): Promise<MediaStreamTrack> {
+    // Enumerate cameras when possible for reliable front/back switch
     try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const cams = devices.filter((d) => d.kind === 'videoinput');
+      videoDeviceIdsRef.current = cams.map((c) => c.deviceId).filter(Boolean);
+      if (cams.length > 1) {
+        const currentId = localStreamRef.current?.getVideoTracks()[0]?.getSettings()?.deviceId;
+        const other =
+          cams.find((c) => c.deviceId && c.deviceId !== currentId) ??
+          cams[next === 'environment' ? cams.length - 1 : 0];
+        if (other?.deviceId) {
+          const stream = await navigator.mediaDevices.getUserMedia({
+            video: {
+              deviceId: { ideal: other.deviceId },
+              width: { ideal: 1280 },
+              height: { ideal: 720 },
+            },
+            audio: false,
+          });
+          return stream.getVideoTracks()[0];
+        }
+      }
+    } catch {
+      /* fall through to facingMode */
+    }
+
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: {
+        facingMode: { ideal: next },
+        width: { ideal: 1280 },
+        height: { ideal: 720 },
+      },
+      audio: false,
+    });
+    return stream.getVideoTracks()[0];
+  }
+
+  async function switchCamera(target?: 'user' | 'environment') {
+    if (mode !== 'video' || switchingCam) return;
+    const next: 'user' | 'environment' =
+      target ?? (facingMode === 'user' ? 'environment' : 'user');
+    setSwitchingCam(true);
+    setError('');
+    try {
+      // Stop old track FIRST (mobile often allows only one camera session)
       if (roomRef.current) {
-        // LiveKit: republish with new facing mode
         const old = localTracksRef.current.find((t) => t.kind === Track.Kind.Video);
         if (old) {
           await roomRef.current.localParticipant.unpublishTrack(old);
           old.stop();
         }
-        const tracks = await createLocalTracks({ video: { facingMode: next }, audio: false });
+        const tracks = await createLocalTracks({
+          video: { facingMode: next },
+          audio: false,
+        });
         const video = tracks.find((t) => t.kind === Track.Kind.Video);
         if (video) {
           localTracksRef.current = localTracksRef.current.filter((t) => t.kind !== Track.Kind.Video);
@@ -762,27 +893,51 @@ export function CallPage({ mode }: { mode: 'voice' | 'video' }) {
           if (localVideoRef.current) video.attach(localVideoRef.current);
           await roomRef.current.localParticipant.publishTrack(video);
         }
+        facingModeRef.current = next;
         setFacingMode(next);
+        setMirrorSelf(next === 'user');
         return;
       }
+
       if (!localStreamRef.current || !pcRef.current) return;
-      const newStream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: next },
-        audio: false,
-      });
-      const newTrack = newStream.getVideoTracks()[0];
       const oldTrack = localStreamRef.current.getVideoTracks()[0];
-      const sender = pcRef.current.getSenders().find((s) => s.track?.kind === 'video');
-      if (sender && newTrack) await sender.replaceTrack(newTrack);
       if (oldTrack) {
         localStreamRef.current.removeTrack(oldTrack);
         oldTrack.stop();
       }
-      if (newTrack) localStreamRef.current.addTrack(newTrack);
-      if (localVideoRef.current) localVideoRef.current.srcObject = localStreamRef.current;
+
+      const newTrack = await acquireVideoTrack(next);
+      if (!newTrack) throw new Error('No camera available');
+
+      const sender = pcRef.current.getSenders().find((s) => s.track?.kind === 'video' || s.track == null);
+      const videoSender =
+        sender ??
+        pcRef.current.getSenders().find((s) => !s.track || s.track.kind === 'video');
+      if (videoSender) {
+        await videoSender.replaceTrack(newTrack);
+      } else {
+        pcRef.current.addTrack(newTrack, localStreamRef.current);
+      }
+
+      localStreamRef.current.addTrack(newTrack);
+      if (localVideoRef.current) {
+        localVideoRef.current.srcObject = localStreamRef.current;
+        void localVideoRef.current.play().catch(() => undefined);
+      }
+      if (camOff) newTrack.enabled = false;
+
+      facingModeRef.current = next;
       setFacingMode(next);
+      setMirrorSelf(next === 'user');
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Could not switch camera');
+      const msg = err instanceof Error ? err.message : 'Could not switch camera';
+      if (/NotFound|Overconstrained|no device/i.test(msg)) {
+        setError(next === 'environment' ? 'Rear camera not available on this device' : 'Front camera not available');
+      } else {
+        setError(msg);
+      }
+    } finally {
+      setSwitchingCam(false);
     }
   }
 
@@ -790,28 +945,40 @@ export function CallPage({ mode }: { mode: 'voice' | 'video' }) {
   const ss = String(seconds % 60).padStart(2, '0');
 
   return (
-    <div className="flex min-h-[75dvh] flex-col items-center justify-between rounded-[28px] bg-gradient-to-b from-slate-900 to-slate-800 p-6 text-white shadow-float">
-      <div className="w-full text-center">
-        <p className="text-xs uppercase tracking-wide text-white/50">
-          {mode === 'video' ? 'Video call' : 'Voice call'} ·{' '}
-          {mediaMode === 'livekit' ? 'LiveKit' : 'WebRTC'} · friends only
-        </p>
-        <h1 className="mt-2 font-display text-2xl font-bold">{peerName}</h1>
-        <p className="mt-2 text-sm text-white/60">{status}</p>
-        <p className="mt-1 font-mono text-lg">
-          {mm}:{ss}
-        </p>
-        <p className="mt-1 inline-flex items-center gap-1 text-xs text-white/50">
-          <Signal size={12} /> {quality}
-        </p>
-        {error ? <p className="mt-2 text-sm text-red-300">{error}</p> : null}
-      </div>
+    <div className="relative flex min-h-[80dvh] flex-col overflow-hidden rounded-[28px] bg-slate-950 text-white shadow-float">
+      {/* Background for voice / video shell */}
+      <div className="pointer-events-none absolute inset-0 bg-gradient-to-b from-slate-900 via-slate-950 to-black" />
 
-      <div
-        className={`relative flex w-full max-w-sm flex-col items-center justify-center overflow-hidden rounded-[24px] ${
-          mode === 'video' ? 'aspect-[9/14] bg-slate-900' : 'h-40'
-        }`}
-      >
+      {/* Top bar */}
+      <header className="relative z-10 flex items-center gap-3 px-4 pb-2 pt-4 sm:px-6">
+        <StudentAvatar name={peerName} size="md" />
+        <div className="min-w-0 flex-1">
+          <p className="truncate font-display text-lg font-bold tracking-tight">{peerName}</p>
+          <p className="truncate text-xs text-white/55">
+            {status}
+            {mode === 'video' ? ' · Video' : ' · Voice'}
+            {mediaMode === 'livekit' ? ' · SFU' : ''}
+          </p>
+        </div>
+        <div className="flex flex-col items-end gap-0.5 text-right">
+          <span className="font-mono text-sm tabular-nums text-white/90">
+            {mm}:{ss}
+          </span>
+          <span className="inline-flex items-center gap-1 text-[11px] text-white/50">
+            <Signal size={11} className={quality === 'Good' ? 'text-emerald-400' : quality === 'Weak' ? 'text-rose-400' : 'text-amber-300'} />
+            {quality}
+          </span>
+        </div>
+      </header>
+
+      {error ? (
+        <p className="relative z-10 mx-4 mb-2 rounded-xl bg-rose-500/15 px-3 py-2 text-center text-xs text-rose-200">
+          {error}
+        </p>
+      ) : null}
+
+      {/* Media stage */}
+      <div className="relative z-10 mx-3 flex min-h-0 flex-1 flex-col overflow-hidden rounded-[24px] border border-white/10 bg-black/40 sm:mx-5">
         {mode === 'video' ? (
           <>
             <video
@@ -820,85 +987,148 @@ export function CallPage({ mode }: { mode: 'voice' | 'video' }) {
               playsInline
               autoPlay
             />
-            <video
-              ref={localVideoRef}
-              className="absolute bottom-3 right-3 h-28 w-20 rounded-xl border border-white/20 object-cover shadow-lg"
-              playsInline
-              autoPlay
-              muted
-            />
+            <audio ref={remoteAudioRef} autoPlay playsInline />
+            {/* Self preview — small PIP */}
+            <div className="absolute bottom-4 right-4 z-20 overflow-hidden rounded-2xl border border-white/25 shadow-2xl shadow-black/50 ring-1 ring-white/10">
+              <video
+                ref={localVideoRef}
+                className={`h-32 w-24 bg-slate-900 object-cover sm:h-36 sm:w-28 ${
+                  mirrorSelf ? 'scale-x-[-1]' : ''
+                }`}
+                playsInline
+                autoPlay
+                muted
+              />
+            </div>
             {camOff ? (
-              <div className="absolute inset-0 flex items-center justify-center bg-slate-800/80 text-white/60">
-                <VideoOff size={40} />
+              <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 bg-slate-950/85">
+                <VideoOff size={44} className="text-white/50" />
+                <p className="text-sm text-white/50">Camera off</p>
+              </div>
+            ) : null}
+            {!connected ? (
+              <div className="absolute inset-0 z-[5] flex items-center justify-center bg-slate-950/40 backdrop-blur-[2px]">
+                <div className="rounded-2xl bg-black/40 px-4 py-3 text-sm text-white/80">{status}</div>
               </div>
             ) : null}
           </>
         ) : (
-          <>
+          <div className="flex flex-1 flex-col items-center justify-center gap-4 py-16">
             <audio ref={remoteAudioRef} autoPlay playsInline />
-            <div className="flex h-24 w-24 items-center justify-center rounded-full bg-primary/30 text-3xl font-bold">
-              {peerName.slice(0, 1).toUpperCase()}
+            <div className="relative">
+              <div className="absolute -inset-3 animate-pulse rounded-full bg-primary/20" />
+              <div className="relative flex h-28 w-28 items-center justify-center rounded-full bg-gradient-to-br from-primary/40 to-primary/10 text-4xl font-bold ring-4 ring-white/10">
+                {peerName.slice(0, 1).toUpperCase()}
+              </div>
             </div>
-          </>
+            <p className="text-sm text-white/50">{status}</p>
+          </div>
         )}
       </div>
 
-      <div className="flex w-full max-w-sm flex-col gap-4">
-        <div className="flex flex-wrap justify-center gap-3">
-          <button
-            type="button"
-            onClick={() => setMuted((v) => !v)}
-            className="rounded-full bg-white/10 p-4"
-            aria-label={muted ? 'Unmute' : 'Mute'}
-          >
+      {/* Controls */}
+      <div className="relative z-10 space-y-3 px-4 py-5 sm:px-6">
+        {mode === 'video' ? (
+          <div className="flex flex-wrap items-center justify-center gap-2">
+            <button
+              type="button"
+              disabled={switchingCam}
+              onClick={() => void switchCamera('user')}
+              className={`rounded-full px-3 py-1.5 text-[11px] font-semibold transition ${
+                facingMode === 'user' ? 'bg-white text-slate-900' : 'bg-white/10 text-white/80'
+              }`}
+            >
+              Front
+            </button>
+            <button
+              type="button"
+              disabled={switchingCam}
+              onClick={() => void switchCamera('environment')}
+              className={`rounded-full px-3 py-1.5 text-[11px] font-semibold transition ${
+                facingMode === 'environment' ? 'bg-white text-slate-900' : 'bg-white/10 text-white/80'
+              }`}
+            >
+              Back
+            </button>
+            <button
+              type="button"
+              onClick={() => setMirrorSelf((v) => !v)}
+              className={`inline-flex items-center gap-1 rounded-full px-3 py-1.5 text-[11px] font-semibold ${
+                mirrorSelf ? 'bg-emerald-500/20 text-emerald-200' : 'bg-white/10 text-white/80'
+              }`}
+            >
+              <FlipHorizontal2 size={12} /> Mirror
+            </button>
+          </div>
+        ) : null}
+
+        <div className="flex flex-wrap items-center justify-center gap-3">
+          <ControlBtn active={!muted} onClick={() => setMuted((v) => !v)} label={muted ? 'Unmute' : 'Mute'}>
             {muted ? <MicOff size={22} /> : <Mic size={22} />}
-          </button>
-          <button
-            type="button"
-            onClick={() => setSpeakerOn((v) => !v)}
-            className="rounded-full bg-white/10 p-4"
-            aria-label={speakerOn ? 'Speaker off' : 'Speaker on'}
-          >
+          </ControlBtn>
+          <ControlBtn active={speakerOn} onClick={() => setSpeakerOn((v) => !v)} label="Speaker">
             {speakerOn ? <Volume2 size={22} /> : <VolumeX size={22} />}
-          </button>
+          </ControlBtn>
           {mode === 'video' ? (
             <>
-              <button
-                type="button"
-                onClick={() => setCamOff((v) => !v)}
-                className="rounded-full bg-white/10 p-4"
-                aria-label={camOff ? 'Camera on' : 'Camera off'}
-              >
+              <ControlBtn active={!camOff} onClick={() => setCamOff((v) => !v)} label="Camera">
                 {camOff ? <VideoOff size={22} /> : <Video size={22} />}
-              </button>
-              <button
-                type="button"
+              </ControlBtn>
+              <ControlBtn
+                active
+                disabled={switchingCam}
                 onClick={() => void switchCamera()}
-                className="rounded-full bg-white/10 p-4"
-                aria-label="Switch camera"
+                label="Switch camera"
               >
-                <SwitchCamera size={22} />
-              </button>
+                <SwitchCamera size={22} className={switchingCam ? 'animate-spin' : ''} />
+              </ControlBtn>
+              <ControlBtn
+                active={false}
+                onClick={() => setError('Screen share coming soon')}
+                label="Share screen"
+              >
+                <MonitorUp size={22} />
+              </ControlBtn>
             </>
           ) : null}
           <button
             type="button"
             onClick={() => void endCall(connected ? 'COMPLETED' : 'REJECTED')}
-            className="rounded-full bg-error p-4"
+            className="flex h-14 w-14 items-center justify-center rounded-full bg-rose-500 shadow-lg shadow-rose-500/40 transition hover:bg-rose-400"
             aria-label="End call"
           >
-            <PhoneOff size={22} />
+            <PhoneOff size={24} />
           </button>
         </div>
-        <Button
-          type="button"
-          variant="secondary"
-          className="!border-white/20 !bg-white/10 !text-white"
-          onClick={() => void endCall(connected ? 'COMPLETED' : 'MISSED')}
-        >
-          End call
-        </Button>
       </div>
     </div>
+  );
+}
+
+function ControlBtn({
+  children,
+  onClick,
+  label,
+  active,
+  disabled,
+}: {
+  children: React.ReactNode;
+  onClick: () => void;
+  label: string;
+  active?: boolean;
+  disabled?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      disabled={disabled}
+      onClick={onClick}
+      aria-label={label}
+      className={`flex h-12 w-12 items-center justify-center rounded-full transition disabled:opacity-50 ${
+        active ? 'bg-white/15 text-white' : 'bg-white/10 text-white/70'
+      }`}
+    >
+      {children}
+    </button>
   );
 }
